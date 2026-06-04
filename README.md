@@ -1,11 +1,17 @@
-# Chrome_Profile_Split_Gnome
+# Chrome Profile Split GNOME
 
-Small GTK utility for separate Chrome profile dock icons on Ubuntu GNOME.
+Small Ubuntu GNOME utilities for a more Windows-like desktop workflow:
 
-## Install
+- Separate dock icons for each Chrome/Chromium profile.
+- `Super+V` clipboard history popup.
+
+## Chrome Profile Dock Icons
+
+### Install
 
 ```bash
-cd ~/chrome-dock-profiles
+git clone git@github.com:HNam1234/Chrome_Profile_Split_Gnome.git
+cd Chrome_Profile_Split_Gnome
 ./install.sh
 ```
 
@@ -40,3 +46,33 @@ Alt+F2, type r, press Enter
 ```
 
 On Wayland, log out and back in instead.
+
+## Clipboard History
+
+### Install
+
+```bash
+cd Chrome_Profile_Split_Gnome/clipboard-history
+./install.sh
+```
+
+### Use
+
+- Press `Super+V` to open clipboard history.
+- Type to search copied text.
+- Press `Enter` or double-click an item to copy it back.
+- Click **Clear History** to remove saved entries.
+
+The clipboard daemon starts automatically on login. Pressing `Super+V` also starts it if it is not running yet.
+
+Clipboard entries are stored locally at:
+
+```text
+~/.local/share/clipboard-history/history.json
+```
+
+## Compatibility
+
+- Best support: Ubuntu GNOME on X11.
+- Wayland: dock settings and clipboard history should work, but Chrome profile window grouping may be less reliable.
+- Hover previews currently target GNOME 42.
