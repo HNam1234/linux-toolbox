@@ -21,6 +21,7 @@ AUTOSTART_DIR = HOME / ".config/autostart"
 CHROME_CONFIG = HOME / ".config/google-chrome"
 CLIPBOARD_SHORTCUT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
 COPYQ_AUTOSTART = AUTOSTART_DIR / "copyq.desktop"
+COPYQ_SHORTCUT = BIN_DIR / "copyq-super-v"
 
 STYLE_ACTIONS = {
     "Smooth Minimize": ("minimize", "Left-click minimizes/restores. Most stable."),
@@ -1110,6 +1111,7 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
 
     def enable_copyq_clipboard(self):
         self.ensure_copyq_installed()
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
         AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
         COPYQ_AUTOSTART.write_text(
             """[Desktop Entry]
@@ -1122,16 +1124,31 @@ X-GNOME-Autostart-enabled=true
 """,
             encoding="utf-8",
         )
+        COPYQ_SHORTCUT.write_text(
+            """#!/usr/bin/env bash
+set -e
+
+if ! pgrep -x copyq >/dev/null 2>&1; then
+  copyq >/dev/null 2>&1 &
+  sleep 0.4
+fi
+
+exec copyq toggle
+""",
+            encoding="utf-8",
+        )
+        COPYQ_SHORTCUT.chmod(0o755)
         self.configure_custom_shortcut(
             CLIPBOARD_SHORTCUT_PATH,
             "Clipboard History",
-            "copyq toggle",
+            str(COPYQ_SHORTCUT),
             "<Super>v",
         )
         subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
     def disable_copyq_clipboard(self):
         COPYQ_AUTOSTART.unlink(missing_ok=True)
+        COPYQ_SHORTCUT.unlink(missing_ok=True)
         self.remove_custom_shortcut(CLIPBOARD_SHORTCUT_PATH)
         if shutil.which("copyq"):
             run(["copyq", "exit"], check=False)
