@@ -1,4 +1,4 @@
-# Chrome Dock Profiles
+# Chrome_Profile_Split_Gnome
 
 Small Ubuntu utility for separate Chrome profile dock icons.
 
