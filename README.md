@@ -1,6 +1,6 @@
 # Chrome_Profile_Split_Gnome
 
-Small Ubuntu utility for separate Chrome profile dock icons.
+Small GTK utility for separate Chrome profile dock icons on Ubuntu GNOME.
 
 ## Install
 
@@ -10,6 +10,15 @@ cd ~/chrome-dock-profiles
 ```
 
 Then open **Chrome Dock Profiles** from Applications.
+
+The app gives you a guided GUI with:
+
+- A system compatibility check.
+- Detected Chrome/Chromium profile cards.
+- One-click install/update for profile dock icons.
+- One-click pinning to Ubuntu Dock.
+- Dock click style choices.
+- Hover preview extension installation.
 
 ## What It Does
 

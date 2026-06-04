@@ -544,89 +544,190 @@ class App(Gtk.ApplicationWindow):
     def __init__(self, application):
         super().__init__(application=application)
         self.set_title("Chrome Dock Profiles")
-        self.set_default_size(760, 560)
-        self.set_border_width(16)
+        self.set_default_size(880, 680)
+        self.set_border_width(0)
         self.profiles = []
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
 
-        title = Gtk.Label()
-        title.set_markup("<b>Chrome Dock Profiles</b>")
-        title.set_xalign(0)
-        root.pack_start(title, False, False, 0)
+        header = Gtk.HeaderBar()
+        header.set_show_close_button(True)
+        header.props.title = "Chrome Dock Profiles"
+        header.props.subtitle = "Separate dock icons for each Chrome profile"
+        self.set_titlebar(header)
 
-        subtitle = Gtk.Label(
-            label="Create separate Ubuntu Dock icons per Chrome profile, tune click behavior, and install hover previews."
+        refresh_header_button = Gtk.Button(label="Refresh")
+        refresh_header_button.set_tooltip_text("Scan Chrome profiles again")
+        refresh_header_button.connect("clicked", self.on_refresh)
+        header.pack_end(refresh_header_button)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        root.pack_start(scroller, True, True, 0)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        content.set_border_width(20)
+        scroller.add(content)
+
+        intro = Gtk.Label()
+        intro.set_markup("<span size='large'><b>Make Chrome profiles behave like separate dock apps.</b></span>")
+        intro.set_xalign(0)
+        intro.set_line_wrap(True)
+        content.pack_start(intro, False, False, 0)
+
+        description = Gtk.Label(
+            label="Install profile-specific launchers, choose how dock clicks behave, and add hover window previews."
         )
-        subtitle.set_xalign(0)
-        subtitle.set_line_wrap(True)
-        root.pack_start(subtitle, False, False, 0)
+        description.set_xalign(0)
+        description.set_line_wrap(True)
+        content.pack_start(description, False, False, 0)
 
-        action_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
-        root.pack_start(action_grid, False, False, 0)
+        self.compatibility_card = self.create_card("System Check")
+        content.pack_start(self.compatibility_card, False, False, 0)
+        self.compatibility_label = Gtk.Label()
+        self.compatibility_label.set_xalign(0)
+        self.compatibility_label.set_line_wrap(True)
+        self.compatibility_card.pack_start(self.compatibility_label, False, False, 0)
 
-        install_button = Gtk.Button(label="Install / Update Chrome Profile Dock Icons")
+        setup_card = self.create_card("Setup")
+        content.pack_start(setup_card, False, False, 0)
+
+        setup_grid = Gtk.Grid(column_spacing=12, row_spacing=12)
+        setup_card.pack_start(setup_grid, False, False, 0)
+
+        install_button = self.create_primary_button("Install Profile Icons", "Create or update one launcher per Chrome profile.")
         install_button.connect("clicked", self.on_install_profiles)
-        action_grid.attach(install_button, 0, 0, 1, 1)
+        setup_grid.attach(install_button, 0, 0, 1, 1)
 
-        pin_button = Gtk.Button(label="Pin Profile Icons To Dock")
+        pin_button = self.create_primary_button("Pin To Dock", "Replace the single Chrome dock icon with profile icons.")
         pin_button.connect("clicked", self.on_pin_profiles)
-        action_grid.attach(pin_button, 1, 0, 1, 1)
+        setup_grid.attach(pin_button, 1, 0, 1, 1)
 
-        hover_button = Gtk.Button(label="Install Hover Window Previews")
+        hover_button = self.create_primary_button("Install Hover Previews", "Show window thumbnails when hovering dock icons.")
         hover_button.connect("clicked", self.on_install_hover)
-        action_grid.attach(hover_button, 0, 1, 1, 1)
+        setup_grid.attach(hover_button, 2, 0, 1, 1)
 
-        refresh_button = Gtk.Button(label="Refresh Profile List")
-        refresh_button.connect("clicked", self.on_refresh)
-        action_grid.attach(refresh_button, 1, 1, 1, 1)
+        style_card = self.create_card("Dock Click Style")
+        content.pack_start(style_card, False, False, 0)
 
-        style_label = Gtk.Label()
-        style_label.set_markup("<b>Dock click style</b>")
-        style_label.set_xalign(0)
-        root.pack_start(style_label, False, False, 0)
+        style_hint = Gtk.Label(label="Choose how a normal left-click on a dock icon behaves.")
+        style_hint.set_xalign(0)
+        style_hint.set_line_wrap(True)
+        style_card.pack_start(style_hint, False, False, 0)
 
-        style_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        root.pack_start(style_box, False, False, 0)
+        self.style_buttons = {}
+        style_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        style_card.pack_start(style_grid, False, False, 10)
 
-        for name, (action, help_text) in STYLE_ACTIONS.items():
-            button = Gtk.Button(label=name)
+        previous = None
+        for index, (name, (action, help_text)) in enumerate(STYLE_ACTIONS.items()):
+            button = Gtk.RadioButton.new_with_label_from_widget(previous, name)
+            previous = button
             button.set_tooltip_text(help_text)
-            button.connect("clicked", self.on_style_clicked, action)
-            style_box.pack_start(button, True, True, 0)
+            button.connect("toggled", self.on_style_toggled, action)
+            self.style_buttons[action] = button
+            style_grid.attach(button, index % 2, index // 2, 1, 1)
 
-        profile_label = Gtk.Label()
-        profile_label.set_markup("<b>Detected profiles</b>")
-        profile_label.set_xalign(0)
-        root.pack_start(profile_label, False, False, 0)
+        self.style_description = Gtk.Label()
+        self.style_description.set_xalign(0)
+        self.style_description.set_line_wrap(True)
+        style_card.pack_start(self.style_description, False, False, 0)
+
+        profile_card = self.create_card("Detected Profiles")
+        content.pack_start(profile_card, True, True, 0)
 
         self.profile_list = Gtk.ListBox()
         self.profile_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        root.pack_start(self.profile_list, True, True, 0)
+        profile_card.pack_start(self.profile_list, True, True, 0)
 
-        log_label = Gtk.Label()
-        log_label.set_markup("<b>Status</b>")
-        log_label.set_xalign(0)
-        root.pack_start(log_label, False, False, 0)
+        status_card = self.create_card("Activity")
+        content.pack_start(status_card, False, False, 0)
+
+        self.status_label = Gtk.Label(label="Ready.")
+        self.status_label.set_xalign(0)
+        self.status_label.set_line_wrap(True)
+        status_card.pack_start(self.status_label, False, False, 0)
 
         self.log_view = Gtk.TextView()
         self.log_view.set_editable(False)
         self.log_view.set_cursor_visible(False)
         self.log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_min_content_height(120)
-        scroller.add(self.log_view)
-        root.pack_start(scroller, False, True, 0)
+        log_scroller = Gtk.ScrolledWindow()
+        log_scroller.set_min_content_height(110)
+        log_scroller.add(self.log_view)
+        status_card.pack_start(log_scroller, False, True, 8)
 
+        self.refresh_compatibility()
+        self.refresh_current_style()
         self.refresh_profiles()
 
+    def create_card(self, title):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(14)
+
+        label = Gtk.Label()
+        label.set_markup(f"<b>{title}</b>")
+        label.set_xalign(0)
+        box.pack_start(label, False, False, 0)
+        return box
+
+    def create_primary_button(self, title, tooltip):
+        button = Gtk.Button(label=title)
+        button.set_tooltip_text(tooltip)
+        button.set_hexpand(True)
+        return button
+
     def log(self, message):
+        self.status_label.set_text(message)
         buffer = self.log_view.get_buffer()
         end = buffer.get_end_iter()
         buffer.insert(end, f"{message}\n")
         mark = buffer.create_mark(None, buffer.get_end_iter(), False)
         self.log_view.scroll_mark_onscreen(mark)
+
+    def refresh_compatibility(self):
+        session = os.environ.get("XDG_SESSION_TYPE", "unknown")
+        shell = run(["gnome-shell", "--version"], check=False) or "GNOME Shell unknown"
+        chrome_available = any(
+            shutil.which(binary)
+            for binary in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+        )
+        xdotool_available = shutil.which("xdotool") is not None
+        config_dir, browser_id = detect_chrome_config()
+
+        lines = [
+            f"Desktop session: {session}",
+            f"Shell: {shell}",
+            f"Browser config: {config_dir if config_dir.exists() else 'not found yet'}",
+        ]
+
+        if session == "x11" and xdotool_available:
+            support = "Full profile window grouping support is available."
+        elif session == "wayland":
+            support = "Wayland detected: launchers and dock styles work, but profile window grouping may be less reliable."
+        else:
+            support = "Partial support: xdotool is missing or the display session is unusual."
+
+        if not chrome_available:
+            support += " Chrome/Chromium executable was not found in PATH."
+
+        self.compatibility_label.set_text(f"{support}\n\n" + "\n".join(lines))
+        return browser_id
+
+    def refresh_current_style(self):
+        current = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False)
+        current = current.strip("'")
+        if current in self.style_buttons:
+            self.style_buttons[current].set_active(True)
+        else:
+            self.style_description.set_text(f"Current dock click action: {current or 'unknown'}")
+
+    def describe_style(self, action):
+        for _name, (style_action, help_text) in STYLE_ACTIONS.items():
+            if style_action == action:
+                return help_text
+        return "Custom dock click behavior."
 
     def refresh_profiles(self):
         self.profiles = self.load_profiles()
@@ -634,19 +735,31 @@ class App(Gtk.ApplicationWindow):
             self.profile_list.remove(child)
 
         if not self.profiles:
-            row = Gtk.Label(label="No Chrome/Chromium profiles found.")
-            row.set_xalign(0)
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            row.set_border_width(8)
+            title = Gtk.Label(label="No Chrome/Chromium profiles found.")
+            title.set_xalign(0)
+            detail = Gtk.Label(label="Open Chrome once and create at least one profile, then press Refresh.")
+            detail.set_xalign(0)
+            detail.set_line_wrap(True)
+            row.pack_start(title, False, False, 0)
+            row.pack_start(detail, False, False, 0)
             self.profile_list.add(row)
         else:
             for profile in self.profiles:
-                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-                row.set_border_width(6)
+                row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                row.set_border_width(8)
                 name = profile["name"]
                 directory = profile["directory"]
                 user_name = profile.get("user_name") or ""
-                label = Gtk.Label(label=f"{name}  ({directory})  {user_name}")
-                label.set_xalign(0)
-                row.pack_start(label, True, True, 0)
+                title = Gtk.Label()
+                title.set_markup(f"<b>{GLib.markup_escape_text(name)}</b>")
+                title.set_xalign(0)
+                detail = Gtk.Label(label=f"{directory}" + (f"  -  {user_name}" if user_name else ""))
+                detail.set_xalign(0)
+                detail.set_line_wrap(True)
+                row.pack_start(title, False, False, 0)
+                row.pack_start(detail, False, False, 0)
                 self.profile_list.add(row)
 
         self.profile_list.show_all()
@@ -679,6 +792,8 @@ class App(Gtk.ApplicationWindow):
         return profiles
 
     def on_refresh(self, _button):
+        self.refresh_compatibility()
+        self.refresh_current_style()
         self.refresh_profiles()
 
     def on_install_profiles(self, _button):
@@ -711,11 +826,14 @@ class App(Gtk.ApplicationWindow):
         except Exception as error:
             self.log(f"Failed to install hover previews: {error}")
 
-    def on_style_clicked(self, _button, action):
+    def on_style_toggled(self, button, action):
+        if not button.get_active():
+            return
         try:
             run(["gsettings", "set", "org.gnome.shell.extensions.dash-to-dock", "click-action", action])
             run(["gsettings", "set", "org.gnome.shell.extensions.dash-to-dock", "middle-click-action", "previews"])
             run(["gsettings", "set", "org.gnome.shell.extensions.dash-to-dock", "activate-single-window", "true"])
+            self.style_description.set_text(self.describe_style(action))
             self.log(f"Dock click style set to {action}.")
         except Exception as error:
             self.log(f"Failed to set style: {error}")
