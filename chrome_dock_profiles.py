@@ -532,6 +532,24 @@ def sanitize_id(value):
     return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-") or "profile"
 
 
+def profile_slug(directory):
+    if directory == "Default":
+        return "default"
+    if directory.startswith("Profile "):
+        suffix = directory.removeprefix("Profile ").strip()
+        if suffix.isdigit():
+            return suffix
+    return sanitize_id(directory)
+
+
+def profile_window_class(directory, index):
+    slug = profile_slug(directory)
+    if slug == "default":
+        return "ChromeProfileDefault"
+    compact = "".join(ch for ch in slug if ch.isalnum())
+    return f"ChromeProfile{compact or index}"
+
+
 def detect_chrome_config():
     if (HOME / ".config/google-chrome/Local State").exists():
         return HOME / ".config/google-chrome", "google-chrome"
@@ -547,6 +565,7 @@ class App(Gtk.ApplicationWindow):
         self.set_default_size(880, 680)
         self.set_border_width(0)
         self.profiles = []
+        self.syncing_style = False
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
@@ -718,10 +737,13 @@ class App(Gtk.ApplicationWindow):
     def refresh_current_style(self):
         current = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False)
         current = current.strip("'")
+        self.syncing_style = True
         if current in self.style_buttons:
             self.style_buttons[current].set_active(True)
+            self.style_description.set_text(self.describe_style(current))
         else:
             self.style_description.set_text(f"Current dock click action: {current or 'unknown'}")
+        self.syncing_style = False
 
     def describe_style(self, action):
         for _name, (style_action, help_text) in STYLE_ACTIONS.items():
@@ -827,6 +849,8 @@ class App(Gtk.ApplicationWindow):
             self.log(f"Failed to install hover previews: {error}")
 
     def on_style_toggled(self, button, action):
+        if self.syncing_style:
+            return
         if not button.get_active():
             return
         try:
@@ -855,7 +879,7 @@ class App(Gtk.ApplicationWindow):
 
         for index, profile in enumerate(self.profiles):
             desktop_id = self.desktop_id_for_profile(profile)
-            class_name = f"ChromeProfile{sanitize_id(profile['directory']).replace('-', '') or index}"
+            class_name = profile_window_class(profile["directory"], index)
             icon_path = ICON_DIR / desktop_id.replace(".desktop", ".png")
             picture = config_dir / profile["directory"] / profile["picture"]
             fallback = config_dir / profile["directory"] / "Google Profile Picture.png"
@@ -895,7 +919,7 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
         run(["update-desktop-database", str(APP_DIR)], check=False)
 
     def desktop_id_for_profile(self, profile):
-        return f"google-chrome-profile-{sanitize_id(profile['directory'])}.desktop"
+        return f"google-chrome-profile-{profile_slug(profile['directory'])}.desktop"
 
     def install_hover_extension(self):
         EXT_DIR.mkdir(parents=True, exist_ok=True)
