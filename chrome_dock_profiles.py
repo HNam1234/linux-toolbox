@@ -917,18 +917,26 @@ detectMaccelVersion() {{
   grep "pkgver=" /opt/maccel/PKGBUILD | grep -oP '\\d\\.\\d\\.\\d' | head -n 1
 }}
 
+detectLatestCliVersion() {{
+  curl -fsSL https://github.com/Gnarus-G/maccel/releases/latest 2>/dev/null \
+    | grep -oP 'v\\d+\\.\\d+\\.\\d+' \
+    | tail -n 1 \
+    | cut -c 2-
+}}
+
 findDkmsSourceDir() {{
-  version="$1"
+  local version="$1"
   printf "/usr/src/maccel-%s" "$version"
 }}
 
 findProblematicEnumSyntax() {{
-  source_dir="$1"
+  local source_dir="$1"
   grep -R "enum accel_mode :" "$source_dir" 2>/dev/null || true
 }}
 
 applyEnumSyntaxPatch() {{
-  source_dir="$1"
+  local source_dir="$1"
+  local matches
   matches="$(findProblematicEnumSyntax "$source_dir")"
   if [ -z "$matches" ]; then
     echo "Patch enum_accel_mode_c_syntax: not needed"
@@ -948,7 +956,7 @@ EOF_PATCH_MATCHES
 }}
 
 verifyEnumSyntaxPatch() {{
-  source_dir="$1"
+  local source_dir="$1"
   if findProblematicEnumSyntax "$source_dir" | grep -q "enum accel_mode :"; then
     echo "Patch enum_accel_mode_c_syntax: failed verification"
     return 1
@@ -958,8 +966,8 @@ verifyEnumSyntaxPatch() {{
 }}
 
 applyCompilerPatchIfNeeded() {{
-  source_dir="$1"
-  version="$2"
+  local source_dir="$1"
+  local version="$2"
   if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
     echo "Patch compiler_path: using $kernel_compiler"
     cat > "$source_dir/dkms.conf" <<EOF_DKMS_CONFIG
@@ -981,7 +989,7 @@ EOF_DKMS_CONFIG
 }}
 
 patchCompilerHardcodes() {{
-  patch_dir="$1"
+  local patch_dir="$1"
   echo "Searching exact compiler assignments in $patch_dir"
   grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" "$patch_dir" 2>/dev/null || true
   while IFS= read -r file; do
@@ -993,7 +1001,7 @@ EOF_COMPILER_PATCH_FILES
 }}
 
 verifyCompilerPatch() {{
-  source_dir="$1"
+  local source_dir="$1"
   if [ -z "$kernel_compiler" ] || ! command -v "$kernel_compiler" >/dev/null 2>&1; then
     echo "Patch compiler_path: verification skipped"
     return 0
@@ -1004,12 +1012,14 @@ verifyCompilerPatch() {{
   echo "Final DKMS driver Makefile compiler lines:"
   grep -RIn "CC[[:space:]]*[?]*=" "$source_dir" /opt/maccel 2>/dev/null || true
 
+  local hardcoded_matches
   hardcoded_matches="$(grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" "$source_dir" 2>/dev/null || true)"
   if [ -n "$hardcoded_matches" ]; then
     echo "Compiler patch verification failed: DKMS source still contains CC=gcc"
     echo "$hardcoded_matches"
     return 1
   fi
+  local opt_hardcoded_matches
   opt_hardcoded_matches="$(grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" /opt/maccel 2>/dev/null || true)"
   if [ -n "$opt_hardcoded_matches" ]; then
     echo "Compiler patch verification failed: /opt/maccel still contains CC=gcc"
@@ -1021,8 +1031,8 @@ verifyCompilerPatch() {{
     echo "Compiler patch verification failed: DKMS config missing CC=$kernel_compiler"
     return 1
   fi
-  if ! grep -RIn "^[[:space:]]*CC ?= gcc[[:space:]]*$" "$source_dir" 2>/dev/null | grep -q "/driver/Makefile:"; then
-    echo "Compiler patch verification failed: DKMS driver/Makefile missing CC ?= gcc"
+  if ! grep -RIn "^[[:space:]]*CC ?= gcc[[:space:]]*$" "$source_dir" 2>/dev/null | grep -q "Makefile:"; then
+    echo "Compiler patch verification failed: DKMS Makefile missing CC ?= gcc"
     return 1
   fi
   if ! grep -RIn "^[[:space:]]*CC ?= gcc[[:space:]]*$" /opt/maccel 2>/dev/null | grep -q "/driver/Makefile:"; then
@@ -1034,7 +1044,7 @@ verifyCompilerPatch() {{
 }}
 
 applyDkmsConfigPatchIfNeeded() {{
-  source_dir="$1"
+  local source_dir="$1"
   if grep -q "@_PKGNAME@\\|@PKGVER@" "$source_dir/dkms.conf"; then
     echo "Patch dkms_config_template: failed"
     return 1
@@ -1049,8 +1059,8 @@ applyDkmsConfigPatchIfNeeded() {{
 }}
 
 applyPatchesIfNeeded() {{
-  source_dir="$1"
-  version="$2"
+  local source_dir="$1"
+  local version="$2"
   enum_needed=false
   enum_applied=false
   enum_verified=false
@@ -1082,15 +1092,37 @@ applyPatchesIfNeeded() {{
 }}
 
 showDkmsMakeLog() {{
-  version="$1"
-  make_log="/var/lib/dkms/maccel/$version/build/make.log"
+  local version="$1"
+  local make_log
+  make_log="$(findDkmsMakeLog "$version")"
   if [ -f "$make_log" ]; then
     echo "==== DKMS make.log: $make_log ===="
     cat "$make_log"
+    first_error="$(grep -Ei "error:|fatal:|undefined reference|implicit declaration|No such file|bad exit status" "$make_log" | head -n 1 || true)"
+    if [ -n "$first_error" ]; then
+      echo "First build error: $first_error"
+    fi
     echo "==== end DKMS make.log ===="
   else
     echo "DKMS make.log was not found at $make_log"
   fi
+}}
+
+findDkmsMakeLog() {{
+  local version="$1"
+  local kernel
+  kernel="$(uname -r)"
+  local arch
+  arch="$(uname -m)"
+  for candidate in \
+    "/var/lib/dkms/maccel/$version/build/make.log" \
+    "/var/lib/dkms/maccel/$version/$kernel/$arch/log/make.log"; do
+    if [ -f "$candidate" ]; then
+      printf "%s" "$candidate"
+      return 0
+    fi
+  done
+  find "/var/lib/dkms/maccel/$version" -path "*/log/make.log" -type f 2>/dev/null | sort | tail -n 1
 }}
 
 checkSecureBootWarning() {{
@@ -1105,7 +1137,7 @@ checkSecureBootWarning() {{
 
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
-  packages=(curl git make dkms gcc sudo wget ca-certificates "linux-headers-$(uname -r)")
+  packages=(curl git make dkms gcc sudo wget ca-certificates build-essential pkg-config libudev-dev "linux-headers-$(uname -r)")
   if [ -n "$compiler_package" ]; then
     packages+=("$compiler_package")
   fi
@@ -1117,76 +1149,216 @@ fi
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
-rm -rf /opt/maccel
-git clone --depth 1 https://github.com/Gnarus-G/maccel.git /opt/maccel
-cd /opt/maccel
 
-dkms_version="$(detectMaccelVersion)"
-if [ -z "$dkms_version" ]; then
-  echo "Could not detect maccel version from /opt/maccel/PKGBUILD."
-  exit 1
-fi
-echo "Preparing DKMS module maccel/$dkms_version..."
-dkms remove -m maccel -v "$dkms_version" --all || true
-dkms_source_dir="$(findDkmsSourceDir "$dkms_version")"
-rm -rf "$dkms_source_dir"
-install -Dm 644 dkms.conf "$dkms_source_dir/dkms.conf"
-sed -e "s/@_PKGNAME@/maccel/" \
-    -e "s/@PKGVER@/$dkms_version/" \
-    -e "s/@DRIVER_CFLAGS@/''/" \
-    -i "$dkms_source_dir/dkms.conf"
-cp -r driver/. "$dkms_source_dir/"
+buildMaccelCliFromSource() {{
+  echo "Building maccel CLI from source with rustup stable..."
+  cd /opt/maccel
+  export CARGO_HOME=/opt/maccel/.cargo
+  export RUSTUP_HOME=/opt/maccel/.rustup
+  export PATH="$CARGO_HOME/bin:$PATH"
 
-echo "Installing udev rules..."
-make udev_uninstall || true
-make udev_install
-
-echo "Applying compatibility patches..."
-applyPatchesIfNeeded "$dkms_source_dir" "$dkms_version"
-
-echo "Building and installing DKMS module..."
-if ! dkms add -m maccel -v "$dkms_version"; then
-  showDkmsMakeLog "$dkms_version"
-  exit 1
-fi
-if ! dkms build -m maccel -v "$dkms_version"; then
-  showDkmsMakeLog "$dkms_version"
-  exit 1
-fi
-if ! dkms install --force -m maccel -v "$dkms_version"; then
-  showDkmsMakeLog "$dkms_version"
-  exit 1
-fi
-
-if ! modprobe maccel; then
-  echo "modprobe maccel failed."
-  checkSecureBootWarning
-  exit 1
-fi
-
-echo "Installing maccel CLI..."
-mkdir -p /opt/maccel/bin
-if curl -fsSL "https://github.com/Gnarus-G/maccel/releases/download/v$dkms_version/maccel-cli.tar.gz" -o "$workdir/maccel-cli.tar.gz"; then
-  tar -zxvf "$workdir/maccel-cli.tar.gz" -C "$workdir"
-  install -m 755 -D "$workdir/maccel_v$dkms_version/maccel" /opt/maccel/bin/maccel
-elif command -v cargo >/dev/null 2>&1; then
-  cargo build --bin maccel --release
-  install -m 755 -D target/release/maccel /opt/maccel/bin/maccel
-else
-  echo "Could not install maccel CLI from release and cargo is not installed."
-  exit 1
-fi
-ln -sf /opt/maccel/bin/maccel /usr/local/bin/maccel
-
-groupadd -f maccel
-if [ -n "${{PKEXEC_UID:-}}" ]; then
-  target_user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1 || true)"
-  if [ -n "$target_user" ]; then
-    usermod -aG maccel "$target_user" || true
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "Installing local rustup toolchain for maccel CLI build..."
+    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$workdir/rustup-init.sh"
+    sh "$workdir/rustup-init.sh" -y --profile minimal --default-toolchain stable --no-modify-path
   fi
-fi
 
-echo "==== maccel install finished $(date -Is) ===="
+  rustup default stable
+  echo "Rust compiler: $(rustc --version || true)"
+  echo "Cargo: $(cargo --version || true)"
+
+  cargo build --bin maccel --release
+  if [ ! -x target/release/maccel ]; then
+    echo "maccel install failed: cargo build completed but target/release/maccel is missing."
+    return 1
+  fi
+
+  install -m 755 -D target/release/maccel /opt/maccel/bin/maccel
+  /opt/maccel/bin/maccel -V
+}}
+
+installAttempt() {{
+  local attempt="$1"
+  echo "==== attempt $attempt/5 ===="
+  echo "Kernel: $(uname -r)"
+  echo "Default gcc: $(gcc --version | head -n 1 || true)"
+  echo "Kernel compiler: ${{kernel_compiler:-unknown}}"
+  selected_compiler="${{kernel_compiler:-gcc}}"
+  echo "Selected compiler: $selected_compiler"
+
+  cd /
+  rm -rf /opt/maccel
+  git clone --depth 1 https://github.com/Gnarus-G/maccel.git /opt/maccel
+  cd /opt/maccel
+
+  dkms_version="$(detectMaccelVersion)"
+  if [ -z "$dkms_version" ]; then
+    echo "maccel install failed: could not detect maccel version from /opt/maccel/PKGBUILD."
+    return 10
+  fi
+  dkms_source_dir="$(findDkmsSourceDir "$dkms_version")"
+  echo "maccel version: $dkms_version"
+  echo "DKMS source path: $dkms_source_dir"
+
+  echo "Preparing DKMS module maccel/$dkms_version..."
+  dkms remove -m maccel -v "$dkms_version" --all || true
+  rm -rf "$dkms_source_dir"
+  install -Dm 644 dkms.conf "$dkms_source_dir/dkms.conf"
+  sed -e "s/@_PKGNAME@/maccel/" \
+      -e "s/@PKGVER@/$dkms_version/" \
+      -e "s/@DRIVER_CFLAGS@/''/" \
+      -i "$dkms_source_dir/dkms.conf"
+  cp -r driver/. "$dkms_source_dir/"
+
+  echo "Installing udev rules..."
+  make udev_uninstall || true
+  make udev_install
+
+  echo "Applying compatibility patches..."
+  if ! applyPatchesIfNeeded "$dkms_source_dir" "$dkms_version"; then
+    echo "maccel install failed: compatibility patch verification failed."
+    return 11
+  fi
+
+  echo "Building and installing DKMS module..."
+  if ! dkms add -m maccel -v "$dkms_version"; then
+    showDkmsMakeLog "$dkms_version"
+    return 20
+  fi
+  if ! dkms build -m maccel -v "$dkms_version" -k "$(uname -r)"; then
+    showDkmsMakeLog "$dkms_version"
+    return 20
+  fi
+  showDkmsMakeLog "$dkms_version"
+  make_log="$(findDkmsMakeLog "$dkms_version")"
+  if [ -f "$make_log" ]; then
+    if grep -q "make CC=gcc " "$make_log"; then
+      echo "maccel install failed: DKMS make.log still shows make CC=gcc."
+      return 22
+    fi
+    if ! grep -q "CC=gcc-12\\|gcc-12" "$make_log"; then
+      echo "maccel install failed: DKMS make.log does not show gcc-12."
+      return 23
+    fi
+  else
+    echo "maccel install failed: DKMS make.log missing immediately after build."
+    return 23
+  fi
+  if ! dkms install --force -m maccel -v "$dkms_version" -k "$(uname -r)"; then
+    showDkmsMakeLog "$dkms_version"
+    return 20
+  fi
+
+  echo "DKMS status:"
+  dkms status maccel || true
+  if ! dkms status maccel | grep -q "maccel/$dkms_version.*$(uname -r).*installed"; then
+    echo "maccel install failed: DKMS status does not show installed for $(uname -r)."
+    return 21
+  fi
+
+  if ! modprobe maccel; then
+    echo "modprobe maccel failed."
+    checkSecureBootWarning
+    dmesg | tail -100 || true
+    if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+      echo "maccel built but module loading blocked, likely Secure Boot"
+      return 30
+    fi
+    echo "maccel install failed: modprobe maccel failed."
+    return 24
+  fi
+
+  if ! lsmod | grep -q "^maccel"; then
+    echo "maccel install failed: module loaded command succeeded but lsmod does not show maccel."
+    return 25
+  fi
+
+  echo "Installing maccel CLI..."
+  mkdir -p /opt/maccel/bin
+  cli_version="$(detectLatestCliVersion || true)"
+  if [ -z "$cli_version" ]; then
+    cli_version="$dkms_version"
+  fi
+  echo "maccel CLI version: $cli_version"
+  if curl -fsSL "https://github.com/Gnarus-G/maccel/releases/download/v$cli_version/maccel-cli.tar.gz" -o "$workdir/maccel-cli.tar.gz"; then
+    tar -zxvf "$workdir/maccel-cli.tar.gz" -C "$workdir"
+    install -m 755 -D "$workdir/maccel_v$cli_version/maccel" /opt/maccel/bin/maccel
+  fi
+
+  if [ ! -x /opt/maccel/bin/maccel ] || ! /opt/maccel/bin/maccel -V >/dev/null 2>&1; then
+    echo "Downloaded maccel CLI is missing or incompatible; building CLI from source."
+    /opt/maccel/bin/maccel -V || true
+    rm -f /opt/maccel/bin/maccel
+    if ! buildMaccelCliFromSource; then
+      echo "maccel install failed: could not build a compatible maccel CLI from source."
+      return 26
+    fi
+  fi
+
+  if ! /opt/maccel/bin/maccel -V; then
+    echo "maccel install failed: installed maccel CLI cannot run."
+    return 26
+  fi
+  ln -sf /opt/maccel/bin/maccel /usr/local/bin/maccel
+
+  groupadd -f maccel
+  if [ -n "${{PKEXEC_UID:-}}" ]; then
+    target_user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1 || true)"
+    if [ -n "$target_user" ]; then
+      usermod -aG maccel "$target_user" || true
+    fi
+  fi
+
+  echo "maccel installed and loaded successfully"
+  return 0
+}}
+
+previous_error=""
+repeat_count=0
+final_status=1
+for attempt in 1 2 3 4 5; do
+  set +e
+  installAttempt "$attempt"
+  final_status=$?
+  set -e
+  if [ "$final_status" -eq 0 ] || [ "$final_status" -eq 30 ]; then
+    break
+  fi
+
+  dkms_version="$(detectMaccelVersion || true)"
+  make_log="/var/lib/dkms/maccel/$dkms_version/build/make.log"
+  current_error=""
+  if [ -f "$make_log" ]; then
+    current_error="$(grep -Ei "error:|fatal:|undefined reference|implicit declaration|No such file|bad exit status|make CC=gcc" "$make_log" | head -n 1 || true)"
+  fi
+  if [ -n "$current_error" ]; then
+    echo "Detected root error: $current_error"
+    if [ "$current_error" = "$previous_error" ]; then
+      repeat_count=$((repeat_count + 1))
+    else
+      repeat_count=1
+      previous_error="$current_error"
+    fi
+    if [ "$repeat_count" -ge 2 ] && printf "%s" "$current_error" | grep -q "ftrivial-auto-var-init\\|make CC=gcc"; then
+      echo "maccel install failed: same compiler error repeated after compiler patch verification."
+      break
+    fi
+  fi
+
+  echo "Retrying maccel install after failed attempt $attempt..."
+done
+
+if [ "$final_status" -eq 0 ]; then
+  echo "==== maccel install finished $(date -Is) ===="
+  exit 0
+fi
+if [ "$final_status" -eq 30 ]; then
+  echo "==== maccel install finished with module loading blocker $(date -Is) ===="
+  exit 30
+fi
+echo "maccel install failed: installer exhausted retry policy or hit a concrete root cause."
+echo "==== maccel install failed $(date -Is) ===="
+exit "$final_status"
 """,
             encoding="utf-8",
         )
