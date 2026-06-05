@@ -4,6 +4,7 @@ set -euo pipefail
 app_dir="$HOME/.local/share/chrome-dock-profiles"
 bin_dir="$HOME/.local/bin"
 desktop_file="$HOME/.local/share/applications/chrome-dock-profiles.desktop"
+new_desktop_file="$HOME/.local/share/applications/linux-toolbox.desktop"
 
 mkdir -p "$app_dir" "$bin_dir" "$HOME/.local/share/applications"
 cp "$(dirname "$0")/chrome_dock_profiles.py" "$app_dir/chrome_dock_profiles.py"
@@ -21,7 +22,7 @@ exec python3 "$app_dir/chrome_dock_profiles.py" "\$@"
 EOF
 chmod +x "$bin_dir/chrome-dock-profiles"
 
-cat > "$desktop_file" <<EOF
+cat > "$new_desktop_file" <<EOF
 [Desktop Entry]
 Version=1.0
 Name=Linux Toolbox
@@ -32,6 +33,7 @@ Type=Application
 Categories=Utility;
 Icon=applications-utilities
 EOF
+rm -f "$desktop_file"
 
 update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
 echo "Installed. Open 'Linux Toolbox' from Applications, or run:"
