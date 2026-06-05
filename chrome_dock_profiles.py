@@ -970,17 +970,29 @@ BUILT_MODULE_NAME[0]="maccel"
 DEST_MODULE_LOCATION[0]="/kernel/drivers/usb"
 AUTOINSTALL="yes"
 EOF_DKMS_CONFIG
-    while IFS= read -r file; do
-      [ -n "$file" ] || continue
-      sed -i "s/CC=gcc\\([^0-9-]\\|$\\)/CC=$kernel_compiler\\1/g" "$file"
-      sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "$file"
-    done <<EOF_COMPILER_PATCH_FILES
-$(grep -RIl "CC=gcc" "$source_dir" 2>/dev/null || true)
-EOF_COMPILER_PATCH_FILES
+    patchCompilerHardcodes "$source_dir"
+    if [ -d /opt/maccel ]; then
+      patchCompilerHardcodes /opt/maccel
+    fi
     export CC="$kernel_compiler"
   else
     echo "Patch compiler_path: not needed"
   fi
+}}
+
+patchCompilerHardcodes() {{
+  patch_dir="$1"
+  echo "Searching compiler hardcodes in $patch_dir"
+  grep -RIn "make CC=gcc\\|CC=gcc" "$patch_dir" 2>/dev/null || true
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "$file"
+    sed -i "s/make CC=gcc\\([^0-9-]\\|$\\)/make CC=\\$(CC)\\1/g" "$file"
+    sed -i "s/\\$(MAKE) CC=gcc\\([^0-9-]\\|$\\)/\\$(MAKE) CC=\\$(CC)\\1/g" "$file"
+    sed -i "s/CC=gcc\\([^0-9-]\\|$\\)/CC=$kernel_compiler\\1/g" "$file"
+  done <<EOF_COMPILER_PATCH_FILES
+$(grep -RIl "make CC=gcc\\|CC=gcc" "$patch_dir" 2>/dev/null || true)
+EOF_COMPILER_PATCH_FILES
 }}
 
 verifyCompilerPatch() {{
@@ -992,6 +1004,8 @@ verifyCompilerPatch() {{
 
   echo "Final DKMS config:"
   cat "$source_dir/dkms.conf"
+  echo "Final DKMS Makefile compiler lines:"
+  grep -n "CC=\\|CC ?=\\|\\$(MAKE).*CC=" "$source_dir/Makefile" || true
 
   hardcoded_matches="$(grep -RIn "CC=gcc" "$source_dir" 2>/dev/null | grep -v "CC=$kernel_compiler" || true)"
   if [ -n "$hardcoded_matches" ]; then
@@ -1002,6 +1016,14 @@ verifyCompilerPatch() {{
 
   if ! grep -q "CC=$kernel_compiler" "$source_dir/dkms.conf"; then
     echo "Compiler patch verification failed: DKMS config missing CC=$kernel_compiler"
+    return 1
+  fi
+  if grep -q "^[[:space:]]*CC=gcc$" "$source_dir/Makefile"; then
+    echo "Compiler patch verification failed: DKMS Makefile still assigns CC=gcc"
+    return 1
+  fi
+  if ! grep -q 'CC=$(CC)' "$source_dir/Makefile"; then
+    echo 'Compiler patch verification failed: DKMS Makefile missing CC=$(CC) nested build command'
     return 1
   fi
 
