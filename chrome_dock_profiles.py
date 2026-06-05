@@ -29,10 +29,15 @@ COPYQ_START = BIN_DIR / "copyq-start"
 COPYQ_SERVICE = SYSTEMD_USER_DIR / "copyq.service"
 CONFIG_DIR = HOME / ".config/chrome-dock-profiles"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+MOUSE_APPLY_ON_LOGIN = BIN_DIR / "chrome-dock-profiles-apply-mouse"
+MOUSE_AUTOSTART = AUTOSTART_DIR / "chrome-dock-profiles-mouse.desktop"
 MOUSE_BACKUP_PATH = CONFIG_DIR / "maccel-previous-state.json"
 MOUSE_COMMAND_LOG = CONFIG_DIR / "mouse-movement-commands.log"
 MOUSE_INSTALLER = BIN_DIR / "chrome-dock-profiles-install-maccel"
 MOUSE_INSTALL_LOG = CONFIG_DIR / "maccel-install.log"
+MOUSE_PERMISSION_FIXER = BIN_DIR / "chrome-dock-profiles-fix-maccel-permission"
+SENS_MULT_PATH = Path("/sys/module/maccel/parameters/SENS_MULT")
+MACCEL_GROUP = "maccel"
 
 STYLE_ACTIONS = {
     "Smooth Minimize": ("minimize", "Left-click minimizes/restores. Most stable."),
@@ -601,6 +606,18 @@ def iso_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def current_username():
+    for value in (os.environ.get("USER"), os.environ.get("LOGNAME")):
+        if value and value.strip():
+            return value.strip()
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return ""
+
+
 class MaccelBackend:
     def __init__(self, command_logger=None):
         self.command_logger = command_logger
@@ -654,6 +671,36 @@ class MaccelBackend:
         self._run(["set", "all", "natural", "0.1", "1.0", "1.65"])
         self._run(["set", "mode", "natural"])
 
+    def detectCurrentPreset(self):
+        if not self.isAvailable():
+            return "default_ubuntu"
+        config = self.readCurrentConfig()
+        mode = self._normalize_mode(config.get("mode", ""))
+        common = config.get("common", [])
+        linear = config.get("linear", [])
+        natural = config.get("natural", [])
+        if self._close_values(common, [1.0, 1.0, 1000.0, 0.0]):
+            if mode == "linear" and self._close_values(linear, [0.055, 1.5, 2.8]):
+                return "windows"
+            if mode == "natural" and self._close_values(natural, [0.1, 1.0, 1.65]):
+                return "macos"
+        if mode == "linear" and self._close_values(linear, [0.0, 0.0, 0.0]):
+            return "default_ubuntu"
+        if mode in {"no-accel", "none"}:
+            return "default_ubuntu"
+        return "custom"
+
+    def setSensMultiplier(self, multiplier):
+        value = float(multiplier)
+        if value <= 0:
+            raise RuntimeError("Sensitivity multiplier must be greater than 0.")
+        self._run(["set", "param", "sens-mult", self._format_value(value)])
+        return value
+
+    def _format_value(self, value):
+        text = f"{float(value):.4f}".rstrip("0").rstrip(".")
+        return text or "0"
+
     def backup(self):
         config = self.readCurrentConfig()
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -701,6 +748,11 @@ class MaccelBackend:
 
     def _string_values(self, values):
         return [str(value) for value in values]
+
+    def _close_values(self, actual, expected, tolerance=0.0005):
+        if len(actual) != len(expected):
+            return False
+        return all(abs(float(left) - float(right)) <= tolerance for left, right in zip(actual, expected))
 
 
 class MaccelCompatibilityPatchManager:
@@ -776,9 +828,254 @@ class MaccelCompatibilityPatchManager:
         return self.report
 
 
+class PermissionStatus:
+    def __init__(
+        self,
+        maccelLoaded,
+        sensMultExists,
+        sensMultWritable,
+        userInMaccelGroup,
+        currentSessionInWriteGroup,
+        parameterGroup,
+        sysfsReadOnly,
+        needsLogout,
+        message,
+    ):
+        self.maccelLoaded = maccelLoaded
+        self.sensMultExists = sensMultExists
+        self.sensMultWritable = sensMultWritable
+        self.userInMaccelGroup = userInMaccelGroup
+        self.currentSessionInWriteGroup = currentSessionInWriteGroup
+        self.parameterGroup = parameterGroup
+        self.sysfsReadOnly = sysfsReadOnly
+        self.needsLogout = needsLogout
+        self.message = message
+
+    def to_dict(self):
+        return {
+            "maccelLoaded": self.maccelLoaded,
+            "sensMultExists": self.sensMultExists,
+            "sensMultWritable": self.sensMultWritable,
+            "userInMaccelGroup": self.userInMaccelGroup,
+            "currentSessionInWriteGroup": self.currentSessionInWriteGroup,
+            "parameterGroup": self.parameterGroup,
+            "sysfsReadOnly": self.sysfsReadOnly,
+            "needsLogout": self.needsLogout,
+            "message": self.message,
+        }
+
+
+class MaccelPermissionService:
+    """Checks and repairs the ability of the current process to write maccel
+    kernel parameters such as /sys/module/maccel/parameters/SENS_MULT.
+
+    The repair flow prefers the supported approach (maccel group ownership via
+    udev rules) and never chmods sysfs files as a permanent fix. All privileged
+    steps are bundled into a single pkexec invocation so the user is asked to
+    authenticate at most once per fix.
+    """
+
+    def __init__(self, username=None):
+        self.username = username or current_username()
+
+    def isMaccelLoaded(self):
+        if Path("/sys/module/maccel").exists():
+            return True
+        output = run(["lsmod"], check=False)
+        return any(line.split()[:1] == ["maccel"] for line in output.splitlines() if line.strip())
+
+    def doesSensMultExist(self):
+        return SENS_MULT_PATH.exists()
+
+    def canWriteSensMult(self):
+        # Mirrors `test -w`: reflects whether THIS process (with its current
+        # session group membership) may write the file.
+        try:
+            return self.doesSensMultExist() and os.access(SENS_MULT_PATH, os.W_OK)
+        except Exception:
+            return False
+
+    def listUserGroups(self):
+        user = self.username
+        if not user:
+            return []
+        output = run(["id", "-nG", user], check=False)
+        return [name for name in output.split() if name]
+
+    def listCurrentProcessGroups(self):
+        output = run(["id", "-nG"], check=False)
+        return [name for name in output.split() if name]
+
+    def parameterGroupName(self):
+        if not self.doesSensMultExist():
+            return ""
+        try:
+            import grp
+
+            return grp.getgrgid(SENS_MULT_PATH.stat().st_gid).gr_name
+        except Exception:
+            return ""
+
+    def isSysfsReadOnly(self):
+        try:
+            for line in Path("/proc/mounts").read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[1] == "/sys":
+                    return "ro" in parts[3].split(",")
+        except Exception:
+            return False
+        return False
+
+    def isUserInMaccelGroup(self):
+        # Reflects the configured group membership (what `usermod -aG` changes),
+        # which updates immediately even if the live session has not picked it up.
+        if MACCEL_GROUP in self.listUserGroups():
+            return True
+        try:
+            import grp
+
+            return self.username in grp.getgrnam(MACCEL_GROUP).gr_mem
+        except Exception:
+            return False
+
+    def doesMaccelGroupExist(self):
+        return bool(run(["getent", "group", MACCEL_GROUP], check=False).strip())
+
+    # --- Privileged step builders (composed into one pkexec script) ---------
+
+    def ensureMaccelGroupExists(self):
+        return ['getent group maccel >/dev/null 2>&1 || groupadd maccel']
+
+    def addCurrentUserToMaccelGroup(self):
+        user = self.username
+        if not user:
+            return []
+        return [f'usermod -aG maccel "{user}"']
+
+    def reloadUdevRules(self):
+        return [
+            'udevadm control --reload-rules',
+            'udevadm trigger',
+        ]
+
+    def reloadMaccelModule(self):
+        return [
+            'modprobe -r maccel || true',
+            'modprobe maccel',
+        ]
+
+    def getPermissionStatus(self):
+        maccel_loaded = self.isMaccelLoaded()
+        sens_exists = self.doesSensMultExist()
+        sens_writable = self.canWriteSensMult()
+        in_group = self.isUserInMaccelGroup()
+        parameter_group = self.parameterGroupName()
+        current_groups = self.listCurrentProcessGroups()
+        configured_groups = self.listUserGroups()
+        current_session_in_write_group = bool(parameter_group and parameter_group in current_groups)
+        configured_in_write_group = bool(parameter_group and parameter_group in configured_groups)
+        sysfs_read_only = self.isSysfsReadOnly()
+
+        needs_logout = False
+        if sens_writable:
+            message = "maccel parameters are writable."
+        elif not maccel_loaded:
+            message = "maccel kernel module is not loaded."
+        elif not sens_exists:
+            message = "maccel SENS_MULT parameter was not found."
+        elif sysfs_read_only:
+            message = "/sys is mounted read-only, so maccel parameters cannot be changed in this session."
+        elif configured_in_write_group and not current_session_in_write_group:
+            needs_logout = True
+            message = f"Log out and back in so this session joins the {parameter_group} group."
+        elif in_group:
+            message = "maccel group is configured, but driver parameters are still not writable."
+        else:
+            message = "User is not in the maccel write group yet."
+
+        return PermissionStatus(
+            maccelLoaded=maccel_loaded,
+            sensMultExists=sens_exists,
+            sensMultWritable=sens_writable,
+            userInMaccelGroup=in_group,
+            currentSessionInWriteGroup=current_session_in_write_group,
+            parameterGroup=parameter_group,
+            sysfsReadOnly=sysfs_read_only,
+            needsLogout=needs_logout,
+            message=message,
+        )
+
+    def _write_fixer_script(self):
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        steps = []
+        steps += self.ensureMaccelGroupExists()
+        steps += self.addCurrentUserToMaccelGroup()
+        steps += self.reloadUdevRules()
+        steps += self.reloadMaccelModule()
+        body = "\n".join(steps)
+        user = self.username or "$SUDO_USER"
+        MOUSE_PERMISSION_FIXER.write_text(
+            f"""#!/usr/bin/env bash
+set -uo pipefail
+
+log_path="{MOUSE_INSTALL_LOG}"
+mkdir -p "$(dirname "$log_path")"
+exec >>"$log_path" 2>&1
+
+echo "==== maccel permission fix started $(date -Is) ===="
+
+echo "Creating maccel group if needed..."
+{steps[0]}
+
+echo "Adding user to maccel group..."
+{(steps[1] if len(self.addCurrentUserToMaccelGroup()) else 'true')}
+
+echo "Reloading udev rules..."
+udevadm control --reload-rules
+udevadm trigger
+
+echo "Reloading maccel module..."
+modprobe -r maccel || true
+modprobe maccel
+
+echo "Rechecking write permission..."
+ls -l "{SENS_MULT_PATH}" || true
+if [ -w "{SENS_MULT_PATH}" ]; then
+  echo "maccel permission fix: SENS_MULT writable"
+else
+  echo "maccel permission fix: SENS_MULT still not writable in fix process"
+fi
+echo "Groups for {user}: $(id -nG "{user}" 2>/dev/null || true)"
+echo "==== maccel permission fix finished $(date -Is) ===="
+""",
+            encoding="utf-8",
+        )
+        MOUSE_PERMISSION_FIXER.chmod(
+            MOUSE_PERMISSION_FIXER.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        )
+        return MOUSE_PERMISSION_FIXER
+
+    def startFixPermissions(self):
+        if shutil.which("pkexec") is None:
+            raise RuntimeError("pkexec is not installed. Cannot run the maccel permission fix.")
+        fixer = self._write_fixer_script()
+        command = ["pkexec", str(fixer)]
+        return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def fixPermissions(self):
+        # Blocking variant: runs the privileged fix once, then returns fresh status.
+        if shutil.which("pkexec") is None:
+            raise RuntimeError("pkexec is not installed. Cannot run the maccel permission fix.")
+        fixer = self._write_fixer_script()
+        run(["pkexec", str(fixer)], check=False)
+        return self.getPermissionStatus()
+
+
 class MouseMovementService:
     def __init__(self):
         self.backend = MaccelBackend(self._log_command)
+        self.permission_service = MaccelPermissionService()
         self.required_commands = ("curl", "git", "make", "dkms", "gcc", "sudo")
 
     def isSupportedPlatform(self):
@@ -815,11 +1112,48 @@ class MouseMovementService:
     def getCurrentPresetState(self):
         return load_app_config().get("mouseMovement", {}).get("activePreset", "unknown")
 
+    def getDetectedPresetState(self):
+        if not self.isMaccelInstalled():
+            return "default_ubuntu"
+        try:
+            return self.backend.detectCurrentPreset()
+        except Exception:
+            return "unknown"
+
     def applyWindowsPreset(self):
         self._apply_preset("windows", self.backend.applyWindowsEppPreset)
 
     def applyMacOSPreset(self):
         self._apply_preset("macos", self.backend.applyMacOSLikePreset)
+
+    def getPermissionStatus(self):
+        return self.permission_service.getPermissionStatus()
+
+    def startFixPermissions(self):
+        return self.permission_service.startFixPermissions()
+
+    def getLastCustomSensitivity(self):
+        value = load_app_config().get("mouseMovement", {}).get("customSensMult")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 1.0
+
+    def applyCustomSensitivity(self, multiplier):
+        # Caller (UI) is responsible for running the permission preflight before
+        # invoking this. We still re-check here so the maccel CLI is never asked
+        # to write SENS_MULT when the current process cannot.
+        if not self.permission_service.canWriteSensMult():
+            raise PermissionError("maccel SENS_MULT is not writable yet.")
+        backup_path = self.backupCurrentMaccelState()
+        try:
+            applied = self.backend.setSensMultiplier(multiplier)
+        except Exception:
+            self.backend.restore()
+            raise
+        self._save_state("custom", backup_path, custom_sens=applied)
+        self.ensureMouseAutostart()
+        return applied
 
     def backupCurrentMaccelState(self):
         return self.backend.backup()
@@ -827,6 +1161,7 @@ class MouseMovementService:
     def restorePreviousMaccelState(self):
         self.backend.restore()
         self._save_state("previous", str(MOUSE_BACKUP_PATH))
+        self.ensureMouseAutostart()
 
     def runMaccelCommandSafely(self, command):
         return self.backend._run(command)
@@ -858,11 +1193,12 @@ class MouseMovementService:
             self.backend.restore()
             raise
         self._save_state(active_preset, backup_path)
+        self.ensureMouseAutostart()
 
-    def _save_state(self, active_preset, backup_path):
+    def _save_state(self, active_preset, backup_path, custom_sens=None):
         config = load_app_config()
         env = self.getEnvironment()
-        config["mouseMovement"] = {
+        mouse_state = {
             "backend": "maccel",
             "activePreset": active_preset,
             "previousStateBackupPath": backup_path,
@@ -870,7 +1206,98 @@ class MouseMovementService:
             "sessionType": env["sessionType"],
             "desktop": env["desktop"],
         }
+        previous_custom = config.get("mouseMovement", {}).get("customSensMult")
+        if custom_sens is not None:
+            mouse_state["customSensMult"] = custom_sens
+        elif previous_custom is not None:
+            mouse_state["customSensMult"] = previous_custom
+        config["mouseMovement"] = mouse_state
         save_app_config(config)
+
+    def ensureMouseAutostart(self):
+        config = load_app_config()
+        mouse_state = config.get("mouseMovement", {})
+        active = mouse_state.get("activePreset", "unknown")
+        if active not in {"windows", "macos", "custom"}:
+            MOUSE_AUTOSTART.unlink(missing_ok=True)
+            MOUSE_APPLY_ON_LOGIN.unlink(missing_ok=True)
+            return
+
+        AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        MOUSE_APPLY_ON_LOGIN.write_text(
+            f"""#!/usr/bin/env bash
+set -u
+
+log_path="{MOUSE_COMMAND_LOG}"
+mkdir -p "$(dirname "$log_path")"
+echo "$(date -Is) reapply mouse preset at login" >>"$log_path"
+
+if ! command -v maccel >/dev/null 2>&1; then
+  echo "$(date -Is) maccel CLI not found" >>"$log_path"
+  exit 0
+fi
+
+preset="$(python3 - <<'PY' 2>/dev/null
+import json
+from pathlib import Path
+path = Path("{CONFIG_PATH}")
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    data = {{}}
+print(data.get("mouseMovement", {{}}).get("activePreset", "unknown"))
+PY
+)"
+custom_sens="$(python3 - <<'PY' 2>/dev/null
+import json
+from pathlib import Path
+path = Path("{CONFIG_PATH}")
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    data = {{}}
+value = data.get("mouseMovement", {{}}).get("customSensMult", "")
+print(value)
+PY
+)"
+
+case "$preset" in
+  windows)
+    maccel set all common 1.0 1.0 1000.0 0.0 >>"$log_path" 2>&1 || exit 0
+    maccel set all linear 0.055 1.5 2.8 >>"$log_path" 2>&1 || exit 0
+    maccel set mode linear >>"$log_path" 2>&1 || exit 0
+    ;;
+  macos)
+    maccel set all common 1.0 1.0 1000.0 0.0 >>"$log_path" 2>&1 || exit 0
+    maccel set all natural 0.1 1.0 1.65 >>"$log_path" 2>&1 || exit 0
+    maccel set mode natural >>"$log_path" 2>&1 || exit 0
+    ;;
+  custom)
+    if [ -n "$custom_sens" ]; then
+      maccel set param sens-mult "$custom_sens" >>"$log_path" 2>&1 || exit 0
+    fi
+    ;;
+esac
+
+echo "$(date -Is) mouse preset reapplied: $preset" >>"$log_path"
+""",
+            encoding="utf-8",
+        )
+        MOUSE_APPLY_ON_LOGIN.chmod(0o755)
+        MOUSE_AUTOSTART.write_text(
+            f"""[Desktop Entry]
+Type=Application
+Name=Chrome Dock Profiles Mouse Movement
+Comment=Reapply the saved Chrome Dock Profiles mouse preset
+Exec={MOUSE_APPLY_ON_LOGIN}
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=4
+""",
+            encoding="utf-8",
+        )
 
     def _log_command(self, command):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1378,6 +1805,8 @@ class App(Gtk.ApplicationWindow):
         self.mouse_service = MouseMovementService()
         self.mouse_install_process = None
         self.mouse_install_timer_id = None
+        self.mouse_permission_fix_process = None
+        self.mouse_permission_pending = None
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
@@ -1508,7 +1937,7 @@ class App(Gtk.ApplicationWindow):
         mouse_card.pack_start(self.mouse_install_label, False, False, 0)
 
         log_label = Gtk.Label()
-        log_label.set_markup("<b>Install Log</b>")
+        log_label.set_markup("<b>Install / Permission Log</b>")
         log_label.set_xalign(0)
         mouse_card.pack_start(log_label, False, False, 0)
 
@@ -1537,6 +1966,40 @@ class App(Gtk.ApplicationWindow):
         self.mouse_restore_button.set_tooltip_text("Restore the mouse settings backed up before the last preset was applied.")
         self.mouse_restore_button.connect("clicked", self.on_mouse_restore)
         mouse_grid.attach(self.mouse_restore_button, 2, 0, 1, 1)
+
+        custom_label = Gtk.Label()
+        custom_label.set_markup("<b>Custom maccel SensMouse</b>")
+        custom_label.set_xalign(0)
+        mouse_card.pack_start(custom_label, False, False, 0)
+
+        custom_hint = Gtk.Label(
+            label="Set a custom mouse sensitivity multiplier (Sens-Mult). 1.0 is the maccel default."
+        )
+        custom_hint.set_xalign(0)
+        custom_hint.set_line_wrap(True)
+        mouse_card.pack_start(custom_hint, False, False, 0)
+
+        custom_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        mouse_card.pack_start(custom_row, False, False, 0)
+
+        sens_caption = Gtk.Label(label="Sensitivity multiplier")
+        sens_caption.set_xalign(0)
+        custom_row.pack_start(sens_caption, False, False, 0)
+
+        # value, lower, upper, step, page, page_size
+        sens_adjustment = Gtk.Adjustment(1.0, 0.01, 10.0, 0.05, 0.5, 0)
+        self.mouse_custom_sens_spin = Gtk.SpinButton()
+        self.mouse_custom_sens_spin.set_adjustment(sens_adjustment)
+        self.mouse_custom_sens_spin.set_digits(2)
+        self.mouse_custom_sens_spin.set_value(self.mouse_service.getLastCustomSensitivity())
+        self.mouse_custom_sens_spin.set_tooltip_text("maccel Sens-Mult value to apply.")
+        custom_row.pack_start(self.mouse_custom_sens_spin, False, False, 0)
+
+        self.mouse_custom_sens_button = self.create_primary_button(
+            "Custom maccel SensMouse", "Apply your custom maccel sensitivity multiplier."
+        )
+        self.mouse_custom_sens_button.connect("clicked", self.on_mouse_custom_sens)
+        custom_row.pack_end(self.mouse_custom_sens_button, False, False, 0)
 
         self.mouse_backend_label = Gtk.Label()
         self.mouse_backend_label.set_xalign(0)
@@ -1620,16 +2083,27 @@ class App(Gtk.ApplicationWindow):
 
         self.clipboard_switch = self.create_feature_switch(
             clipboard_card,
-            "Clipboard History (CopyQ)",
-            "Turn CopyQ autostart and the Super+V clipboard popup on or off.",
+            "Clipboard History + Startup (CopyQ)",
+            "Keep CopyQ running after login and use Super+V for clipboard history.",
             self.on_clipboard_feature_toggled,
         )
+
+        self.clipboard_status_label = Gtk.Label()
+        self.clipboard_status_label.set_xalign(0)
+        self.clipboard_status_label.set_line_wrap(True)
+        clipboard_card.pack_start(self.clipboard_status_label, False, False, 0)
+
+        self.clipboard_repair_button = Gtk.Button(label="Repair Clipboard Startup")
+        self.clipboard_repair_button.set_tooltip_text("Recreate CopyQ autostart, user service, and Super+V shortcut.")
+        self.clipboard_repair_button.connect("clicked", self.on_clipboard_repair_startup)
+        clipboard_card.pack_start(self.clipboard_repair_button, False, False, 0)
 
         self.refresh_compatibility()
         self.refresh_current_style()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        GLib.idle_add(self.ensure_startup_features_once)
 
     def create_tab_page(self):
         scroller = Gtk.ScrolledWindow()
@@ -1724,6 +2198,25 @@ class App(Gtk.ApplicationWindow):
         self.hover_switch.set_active(self.hover_feature_enabled())
         self.clipboard_switch.set_active(self.clipboard_feature_enabled())
         self.syncing_features = False
+        self.refresh_clipboard_state()
+
+    def refresh_clipboard_state(self):
+        if not hasattr(self, "clipboard_status_label"):
+            return
+        copyq_available = shutil.which("copyq") is not None
+        autostart_ready = COPYQ_AUTOSTART.exists()
+        service_ready = COPYQ_SERVICE.exists()
+        shortcut_ready = COPYQ_SHORTCUT.exists() and CLIPBOARD_SHORTCUT_PATH in parse_gsettings_list(
+            run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], check=False)
+        )
+        config_enabled = self.clipboard_config_enabled()
+        lines = [
+            f"CopyQ: {'installed' if copyq_available else 'not installed'}",
+            f"Startup: {'enabled' if autostart_ready or service_ready else 'not enabled'}",
+            f"Super+V: {'configured' if shortcut_ready else 'not configured'}",
+            f"Saved setting: {'always run clipboard at login' if config_enabled else 'off'}",
+        ]
+        self.clipboard_status_label.set_text("\n".join(lines))
 
     def refresh_mouse_movement_state(self):
         env = self.mouse_service.getEnvironment()
@@ -1731,9 +2224,18 @@ class App(Gtk.ApplicationWindow):
         maccel_available = supported and self.mouse_service.isMaccelInstalled()
         install_status = self.mouse_service.getInstallStatus()
         install_running = self.mouse_install_process is not None and self.mouse_install_process.poll() is None
-        self.mouse_windows_button.set_sensitive(maccel_available)
-        self.mouse_macos_button.set_sensitive(maccel_available)
-        self.mouse_restore_button.set_sensitive(maccel_available and MOUSE_BACKUP_PATH.exists())
+        fix_running = (
+            self.mouse_permission_fix_process is not None
+            and self.mouse_permission_fix_process.poll() is None
+        )
+        self.mouse_windows_button.set_sensitive(maccel_available and not fix_running)
+        self.mouse_macos_button.set_sensitive(maccel_available and not fix_running)
+        self.mouse_restore_button.set_sensitive(
+            maccel_available and MOUSE_BACKUP_PATH.exists() and not fix_running
+        )
+        if hasattr(self, "mouse_custom_sens_button"):
+            self.mouse_custom_sens_button.set_sensitive(maccel_available and not fix_running)
+            self.mouse_custom_sens_spin.set_sensitive(maccel_available and not fix_running)
         self.mouse_install_button.set_sensitive(
             supported and not maccel_available and install_status["pkexecAvailable"] and not install_running
         )
@@ -1789,19 +2291,41 @@ class App(Gtk.ApplicationWindow):
         self.refresh_mouse_install_log_view()
 
         active = self.mouse_service.getCurrentPresetState()
-        active_label = {
-            "windows": "Windows",
-            "macos": "macOS",
-            "previous": "Previous",
-        }.get(active, "Custom / Previous / Unknown")
-        self.mouse_active_label.set_text(f"Active preset: {active_label}")
+        detected = self.mouse_service.getDetectedPresetState()
+        active_label = self.mouse_preset_label(active, saved=True)
+        detected_label = self.mouse_preset_label(detected, saved=False)
+        if active == "custom":
+            try:
+                active_label = f"Custom SensMouse ({self.mouse_service.getLastCustomSensitivity():g})"
+            except Exception:
+                pass
+        self.mouse_active_label.set_text(f"Saved preset: {active_label}\nDetected now: {detected_label}")
 
+        warning_lines = []
         if env["sessionType"] == "wayland":
-            self.mouse_warning_label.set_text("Wayland support may depend on compositor behavior.")
+            warning_lines.append("Wayland support may depend on compositor behavior.")
         elif not supported:
-            self.mouse_warning_label.set_text("Mouse Movement is only supported on Linux.")
-        else:
-            self.mouse_warning_label.set_text("")
+            warning_lines.append("Mouse Movement is only supported on Linux.")
+        if maccel_available:
+            try:
+                permission_status = self.mouse_service.getPermissionStatus()
+                if not permission_status.sensMultWritable:
+                    warning_lines.append(permission_status.message)
+            except Exception:
+                pass
+        self.mouse_warning_label.set_text("\n".join(warning_lines))
+
+    def mouse_preset_label(self, preset, saved=False):
+        labels = {
+            "windows": "Windows",
+            "macos": "macOS-like",
+            "custom": "Custom SensMouse",
+            "previous": "Previous",
+            "default_ubuntu": "Default Ubuntu",
+            "unknown": "Unknown",
+        }
+        fallback = "Not set yet" if saved else "Unknown"
+        return labels.get(preset, fallback)
 
     def refresh_mouse_install_log_view(self):
         if not hasattr(self, "mouse_install_log_view"):
@@ -1996,7 +2520,7 @@ class App(Gtk.ApplicationWindow):
         try:
             if state:
                 self.enable_copyq_clipboard()
-                self.log("Clipboard history enabled with CopyQ. Use Super+V.")
+                self.log("Clipboard history enabled with CopyQ. It will start at login. Use Super+V.")
             else:
                 self.disable_copyq_clipboard()
                 self.log("Clipboard history disabled.")
@@ -2009,13 +2533,235 @@ class App(Gtk.ApplicationWindow):
             self.refresh_feature_state()
         return True
 
-    def on_mouse_windows(self, _button):
+    def on_clipboard_repair_startup(self, _button):
         try:
-            self.mouse_service.applyWindowsPreset()
-            self.log("Active preset: Windows")
+            self.enable_copyq_clipboard()
+            self.log("Clipboard startup repaired. CopyQ will run at login and Super+V is configured.")
         except Exception as error:
-            self.log(f"Failed to apply Windows mouse movement: {error}")
+            self.log(f"Failed to repair clipboard startup: {error}")
+        self.refresh_feature_state()
+
+    def ensure_startup_features_once(self):
+        if self.clipboard_config_enabled():
+            if shutil.which("copyq"):
+                try:
+                    self.enable_copyq_clipboard(allow_install=False, quiet=True)
+                    self.log("Clipboard startup checked.")
+                except Exception as error:
+                    self.log(f"Clipboard startup check failed: {error}")
+            else:
+                self.log("Clipboard is enabled, but CopyQ is not installed.")
+        try:
+            self.mouse_service.ensureMouseAutostart()
+        except Exception as error:
+            self.log(f"Mouse Movement startup check failed: {error}")
+        self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        return False
+
+    def on_mouse_windows(self, _button):
+        self.preflight_and_apply(
+            "windows",
+            lambda: self.mouse_service.applyWindowsPreset(),
+            "Active preset: Windows",
+            "Failed to apply Windows mouse movement",
+        )
+
+    def on_mouse_macos(self, _button):
+        self.preflight_and_apply(
+            "macos",
+            lambda: self.mouse_service.applyMacOSPreset(),
+            "Active preset: macOS",
+            "Failed to apply macOS-like mouse movement",
+        )
+
+    def on_mouse_custom_sens(self, _button):
+        multiplier = round(self.mouse_custom_sens_spin.get_value(), 4)
+        self.preflight_and_apply(
+            "custom",
+            lambda: self.mouse_service.applyCustomSensitivity(multiplier),
+            f"Custom maccel sensitivity applied (Sens-Mult = {multiplier:g})",
+            "Failed to apply custom maccel sensitivity",
+        )
+
+    # --- maccel permission preflight + apply orchestration ------------------
+
+    FRIENDLY_PERMISSION_ERROR = (
+        "Chrome Dock Profiles cannot write to maccel driver parameters yet. "
+        "Fix permission or log out and back in."
+    )
+
+    def preflight_and_apply(self, preset, apply_callback, success_message, failure_prefix):
+        """Run the maccel permission preflight, then apply the requested setting
+        only if SENS_MULT is writable in this process. Otherwise show a friendly
+        permission dialog and remember the pending action for after a fix."""
+        if not self.mouse_service.isMaccelInstalled():
+            self.log("maccel is not installed. Install it first.")
+            return
+
+        self.log("Checking maccel module...")
+        status = self.mouse_service.getPermissionStatus()
+        self.log("Checking SENS_MULT...")
+        self.log("Checking write permission...")
+        self.log("Checking maccel group...")
+
+        if status.sensMultWritable:
+            self.apply_mouse_action(apply_callback, success_message, failure_prefix)
+            return
+
+        self.mouse_permission_pending = {
+            "preset": preset,
+            "apply_callback": apply_callback,
+            "success_message": success_message,
+            "failure_prefix": failure_prefix,
+        }
+
+        if status.needsLogout:
+            self.log(status.message)
+            self.show_logout_required_dialog()
+            return
+
+        self.log(f"Driver write preflight: {status.message}")
+        self.apply_mouse_action(apply_callback, success_message, failure_prefix)
+
+    def apply_mouse_action(self, apply_callback, success_message, failure_prefix):
+        try:
+            apply_callback()
+            self.mouse_permission_pending = None
+            self.log(success_message)
+        except PermissionError:
+            self.log(self.FRIENDLY_PERMISSION_ERROR)
+        except Exception as error:
+            if self.is_permission_denied_error(error):
+                self.log(self.FRIENDLY_PERMISSION_ERROR)
+                self.show_permission_required_dialog()
+            else:
+                self.mouse_permission_pending = None
+                self.log(f"{failure_prefix}: {error}")
+        self.refresh_mouse_movement_state()
+
+    def is_permission_denied_error(self, error):
+        text = str(error).lower()
+        return (
+            "permission denied" in text
+            or "os error 13" in text
+            or "errno 13" in text
+            or "operation not permitted" in text
+        )
+
+    def show_permission_required_dialog(self):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Permission required for maccel",
+        )
+        dialog.format_secondary_text(
+            "Chrome Dock Profiles needs permission to write maccel driver parameters.\n"
+            "This is required to apply custom mouse sensitivity."
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        fix_button = dialog.add_button("Fix Permission", Gtk.ResponseType.OK)
+        fix_button.get_style_context().add_class("suggested-action")
+        response = dialog.run()
+        dialog.destroy()
+        if response == Gtk.ResponseType.OK:
+            self.start_permission_fix()
+        else:
+            self.mouse_permission_pending = None
+            self.log("Permission fix cancelled. No mouse settings were changed.")
+
+    def show_logout_required_dialog(self):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Permission required for maccel",
+        )
+        dialog.format_secondary_text(
+            "Permission was updated, but you need to log out and log back in "
+            "before applying maccel settings."
+        )
+        dialog.add_button("I will log out later", Gtk.ResponseType.CANCEL)
+        recheck_button = dialog.add_button("Recheck", Gtk.ResponseType.OK)
+        recheck_button.get_style_context().add_class("suggested-action")
+        response = dialog.run()
+        dialog.destroy()
+        if response == Gtk.ResponseType.OK:
+            self.recheck_permission_and_continue()
+        else:
+            self.log("Permission updated. Logout/login required.")
+
+    def recheck_permission_and_continue(self):
+        self.log("Rechecking write permission...")
+        status = self.mouse_service.getPermissionStatus()
+        if status.sensMultWritable:
+            self.log("Permission ready")
+            self.resume_pending_action()
+        elif status.needsLogout:
+            self.log("Permission updated. Logout/login required.")
+            self.show_logout_required_dialog()
+        else:
+            self.log(self.FRIENDLY_PERMISSION_ERROR)
+            self.show_permission_required_dialog()
+
+    def start_permission_fix(self):
+        if shutil.which("pkexec") is None:
+            self.log("pkexec is missing, cannot run the maccel permission fix.")
+            self.mouse_permission_pending = None
+            return
+        try:
+            self.log("Creating maccel group if needed...")
+            self.log("Adding user to maccel group...")
+            self.log("Reloading udev rules...")
+            self.log("Reloading maccel module...")
+            self.log("Ubuntu may ask for your password to fix maccel permissions.")
+            self.mouse_permission_fix_process = self.mouse_service.startFixPermissions()
+            GLib.child_watch_add(
+                self.mouse_permission_fix_process.pid, self.on_permission_fix_finished
+            )
+        except Exception as error:
+            self.log(f"Failed to start maccel permission fix: {error}")
+            self.mouse_permission_fix_process = None
+            self.mouse_permission_pending = None
+        self.refresh_mouse_movement_state()
+
+    def on_permission_fix_finished(self, _pid, status):
+        exit_code = status >> 8
+        if self.mouse_permission_fix_process is not None:
+            self.mouse_permission_fix_process.wait()
+        self.mouse_permission_fix_process = None
+        self.refresh_mouse_install_log_view()
+
+        if exit_code != 0:
+            self.log("maccel permission fix did not complete. No settings were changed.")
+            self.refresh_mouse_movement_state()
+            return
+
+        self.log("Rechecking write permission...")
+        new_status = self.mouse_service.getPermissionStatus()
+        if new_status.sensMultWritable:
+            self.log("Permission ready")
+            self.resume_pending_action()
+        elif new_status.needsLogout:
+            self.log("Permission updated. Logout/login required.")
+            self.show_logout_required_dialog()
+        else:
+            self.log(self.FRIENDLY_PERMISSION_ERROR)
+        self.refresh_mouse_movement_state()
+
+    def resume_pending_action(self):
+        pending = self.mouse_permission_pending
+        self.mouse_permission_pending = None
+        if not pending:
+            return
+        self.apply_mouse_action(
+            pending["apply_callback"],
+            pending["success_message"],
+            pending["failure_prefix"],
+        )
 
     def on_mouse_install_backend(self, _button):
         try:
@@ -2047,14 +2793,6 @@ class App(Gtk.ApplicationWindow):
                 message += f" Last log: {detail}"
             message += f" Check {MOUSE_INSTALL_LOG}."
             self.log(message)
-        self.refresh_mouse_movement_state()
-
-    def on_mouse_macos(self, _button):
-        try:
-            self.mouse_service.applyMacOSPreset()
-            self.log("Active preset: macOS")
-        except Exception as error:
-            self.log(f"Failed to apply macOS-like mouse movement: {error}")
         self.refresh_mouse_movement_state()
 
     def on_mouse_restore(self, _button):
@@ -2209,8 +2947,8 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
         enabled = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False))
         return "dock-window-preview@quivio" in enabled
 
-    def enable_copyq_clipboard(self):
-        self.ensure_copyq_installed()
+    def enable_copyq_clipboard(self, allow_install=True, quiet=False):
+        self.ensure_copyq_installed(allow_install=allow_install)
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
         SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
@@ -2242,6 +2980,7 @@ X-GNOME-Autostart-Delay=2
 """,
             encoding="utf-8",
         )
+        COPYQ_AUTOSTART.chmod(0o644)
         COPYQ_SERVICE.write_text(
             f"""[Unit]
 Description=CopyQ clipboard manager
@@ -2286,6 +3025,9 @@ exec copyq show
         run(["copyq", "config", "native_notifications", "false"], check=False)
         run(["systemctl", "--user", "daemon-reload"], check=False)
         run(["systemctl", "--user", "enable", "--now", "copyq.service"], check=False)
+        self.save_clipboard_config(True)
+        if not quiet:
+            self.refresh_clipboard_state()
 
     def disable_copyq_clipboard(self):
         COPYQ_AUTOSTART.unlink(missing_ok=True)
@@ -2297,14 +3039,35 @@ exec copyq show
         self.remove_custom_shortcut(CLIPBOARD_SHORTCUT_PATH)
         if shutil.which("copyq"):
             run(["copyq", "exit"], check=False)
+        self.save_clipboard_config(False)
+        self.refresh_clipboard_state()
 
-    def ensure_copyq_installed(self):
+    def ensure_copyq_installed(self, allow_install=True):
         if shutil.which("copyq"):
             return
+        if not allow_install:
+            raise RuntimeError("CopyQ is not installed.")
         if not shutil.which("pkexec"):
             raise RuntimeError("CopyQ is not installed and pkexec is unavailable. Install it with: sudo apt install copyq")
         self.log("CopyQ is not installed. Ubuntu will ask for your password to install it.")
         run(["pkexec", "apt-get", "install", "-y", "copyq"])
+
+    def save_clipboard_config(self, enabled):
+        config = load_app_config()
+        config["clipboard"] = {
+            "enabled": bool(enabled),
+            "autoStart": bool(enabled),
+            "backend": "copyq",
+            "shortcut": "<Super>v",
+            "lastUpdatedAt": iso_now(),
+        }
+        save_app_config(config)
+
+    def clipboard_config_enabled(self):
+        clipboard_state = load_app_config().get("clipboard")
+        if isinstance(clipboard_state, dict) and "enabled" in clipboard_state:
+            return bool(clipboard_state.get("enabled"))
+        return bool(COPYQ_SHORTCUT.exists() and (COPYQ_AUTOSTART.exists() or COPYQ_SERVICE.exists()))
 
     def configure_custom_shortcut(self, path, name, command, binding):
         current = parse_gsettings_list(
@@ -2329,12 +3092,14 @@ exec copyq show
         run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", format_gsettings_list(current)])
 
     def clipboard_feature_enabled(self):
+        config_enabled = self.clipboard_config_enabled()
         if not shutil.which("copyq") or not COPYQ_SHORTCUT.exists():
             return False
         current = parse_gsettings_list(
             run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], check=False)
         )
-        return CLIPBOARD_SHORTCUT_PATH in current and (COPYQ_AUTOSTART.exists() or COPYQ_SERVICE.exists())
+        files_ready = CLIPBOARD_SHORTCUT_PATH in current and (COPYQ_AUTOSTART.exists() or COPYQ_SERVICE.exists())
+        return config_enabled and files_ready
 
 
 class ChromeDockProfiles(Gtk.Application):
