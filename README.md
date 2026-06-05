@@ -4,6 +4,7 @@ Small Ubuntu GNOME utilities for a more Windows-like desktop workflow:
 
 - Separate dock icons for each Chrome/Chromium profile.
 - `Super+V` clipboard history popup powered by CopyQ.
+- Simple Windows/macOS-like mouse movement presets powered by maccel.
 
 ## Chrome Profile Dock Icons
 
@@ -26,6 +27,7 @@ The app gives you a guided GUI with:
 - Dock click style choices.
 - Hover preview extension installation.
 - CopyQ clipboard history toggle with `Super+V` binding.
+- Mouse Movement presets with Windows, macOS, and Restore Previous buttons.
 
 ## What It Does
 
@@ -69,8 +71,22 @@ CopyQ starts automatically on login. The main **Chrome Dock Profiles** GUI also 
 
 If CopyQ is not installed yet, the GUI/installer asks Ubuntu to install the `copyq` package.
 
+## Mouse Movement
+
+Mouse Movement uses the open-source `maccel` Linux mouse acceleration backend:
+
+https://github.com/Gnarus-G/maccel
+
+The GUI does not install maccel, does not run sudo, and does not expose curve editing. If `maccel` is available in `PATH`, open **Chrome Dock Profiles** and use:
+
+- **Windows** for a Windows Enhanced Pointer Precision-like approximation.
+- **macOS** for a smooth macOS-like approximation.
+- **Restore Previous** to restore the maccel settings backed up before the last preset.
+
+On Wayland, support may depend on compositor behavior.
+
 ## Compatibility
 
 - Best support: Ubuntu GNOME on X11.
-- Wayland: dock settings and clipboard history should work, but Chrome profile window grouping may be less reliable.
+- Wayland: dock settings and clipboard history should work, but Chrome profile window grouping and maccel behavior may be less reliable.
 - Hover previews currently target GNOME 42.

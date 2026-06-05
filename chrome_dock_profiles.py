@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import json
 import os
+import platform
 import shutil
 import stat
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import gi
@@ -25,6 +27,10 @@ COPYQ_AUTOSTART = AUTOSTART_DIR / "copyq.desktop"
 COPYQ_SHORTCUT = BIN_DIR / "copyq-super-v"
 COPYQ_START = BIN_DIR / "copyq-start"
 COPYQ_SERVICE = SYSTEMD_USER_DIR / "copyq.service"
+CONFIG_DIR = HOME / ".config/chrome-dock-profiles"
+CONFIG_PATH = CONFIG_DIR / "config.json"
+MOUSE_BACKUP_PATH = CONFIG_DIR / "maccel-previous-state.json"
+MOUSE_COMMAND_LOG = CONFIG_DIR / "mouse-movement-commands.log"
 
 STYLE_ACTIONS = {
     "Smooth Minimize": ("minimize", "Left-click minimizes/restores. Most stable."),
@@ -575,6 +581,192 @@ def detect_chrome_config():
     return CHROME_CONFIG, "google-chrome"
 
 
+def load_app_config():
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_app_config(config):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def iso_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+class MaccelBackend:
+    def __init__(self, command_logger=None):
+        self.command_logger = command_logger
+
+    def isAvailable(self):
+        return shutil.which("maccel") is not None
+
+    def readCurrentConfig(self):
+        if not self.isAvailable():
+            raise RuntimeError("maccel is not installed.")
+        return {
+            "mode": self._read_mode(),
+            "common": self._read_values(["get", "all", "--oneline", "--quiet", "common"], 4),
+            "linear": self._read_values(["get", "all", "--oneline", "--quiet", "linear"], 3),
+            "natural": self._read_values(["get", "all", "--oneline", "--quiet", "natural"], 3),
+            "synchronous": self._read_values(["get", "all", "--oneline", "--quiet", "synchronous"], 4),
+        }
+
+    def writeConfig(self, config):
+        if not config:
+            raise RuntimeError("No previous maccel backup is available.")
+        common = config.get("common")
+        if common:
+            self._run(["set", "all", "common", *self._string_values(common)])
+
+        mode = config.get("mode", "linear")
+        mode_key = self._normalize_mode(mode)
+        values = config.get(mode_key)
+        if values and mode_key in {"linear", "natural", "synchronous"}:
+            self._run(["set", "all", mode_key, *self._string_values(values)])
+        self._run(["set", "mode", mode_key])
+
+    def applyWindowsEppPreset(self):
+        # Approximation based on RawAccel's Windows Enhanced Pointer Precision
+        # emulation points:
+        # 1.505035,0.85549892; 4.375,3.30972978;
+        # 13.51,15.17478447; 140,354.7026875.
+        # maccel's current CLI exposes parametric curves rather than arbitrary
+        # velocity points, so this uses a conservative linear curve: low-speed
+        # precision, Windows-like mid-speed acceleration, and capped high-speed
+        # movement.
+        self._run(["set", "all", "common", "1.0", "1.0", "1000.0", "0.0"])
+        self._run(["set", "all", "linear", "0.055", "1.5", "2.8"])
+        self._run(["set", "mode", "linear"])
+
+    def applyMacOSLikePreset(self):
+        # macOS pointer acceleration is proprietary and hardware-dependent; this
+        # preset is an approximation. Use maccel's Natural curve with moderate,
+        # smooth gain for desktop navigation instead of FPS/raw aiming.
+        self._run(["set", "all", "common", "1.0", "1.0", "1000.0", "0.0"])
+        self._run(["set", "all", "natural", "0.1", "1.0", "1.65"])
+        self._run(["set", "mode", "natural"])
+
+    def backup(self):
+        config = self.readCurrentConfig()
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        MOUSE_BACKUP_PATH.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+        return str(MOUSE_BACKUP_PATH)
+
+    def restore(self):
+        if not MOUSE_BACKUP_PATH.exists():
+            raise RuntimeError("No previous mouse settings backup was found.")
+        config = json.loads(MOUSE_BACKUP_PATH.read_text(encoding="utf-8"))
+        self.writeConfig(config)
+
+    def _read_mode(self):
+        output = self._run(["get", "mode"])
+        first_line = next((line.strip() for line in output.splitlines() if line.strip()), "")
+        return self._normalize_mode(first_line)
+
+    def _read_values(self, args, expected_count):
+        output = self._run(args)
+        values = [float(value) for value in output.split()]
+        if len(values) != expected_count:
+            raise RuntimeError("Unexpected maccel configuration output.")
+        return values
+
+    def _run(self, args):
+        command = ["maccel", *args]
+        if self.command_logger:
+            self.command_logger(command)
+        completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "maccel command failed").strip())
+        return completed.stdout.strip()
+
+    def _normalize_mode(self, value):
+        normalized = value.strip().lower().replace("_", "-")
+        if normalized.startswith("linear"):
+            return "linear"
+        if normalized.startswith("natural"):
+            return "natural"
+        if normalized.startswith("synchronous"):
+            return "synchronous"
+        if normalized.startswith("no"):
+            return "no-accel"
+        return normalized or "linear"
+
+    def _string_values(self, values):
+        return [str(value) for value in values]
+
+
+class MouseMovementService:
+    def __init__(self):
+        self.backend = MaccelBackend(self._log_command)
+
+    def isSupportedPlatform(self):
+        return platform.system().lower() == "linux"
+
+    def getEnvironment(self):
+        session = os.environ.get("XDG_SESSION_TYPE", "unknown").strip().lower() or "unknown"
+        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "unknown").strip() or "unknown"
+        if session not in {"x11", "wayland"}:
+            session = "unknown"
+        if not desktop:
+            desktop = "unknown"
+        return {"sessionType": session, "desktop": desktop}
+
+    def isMaccelInstalled(self):
+        return self.backend.isAvailable()
+
+    def getCurrentPresetState(self):
+        return load_app_config().get("mouseMovement", {}).get("activePreset", "unknown")
+
+    def applyWindowsPreset(self):
+        self._apply_preset("windows", self.backend.applyWindowsEppPreset)
+
+    def applyMacOSPreset(self):
+        self._apply_preset("macos", self.backend.applyMacOSLikePreset)
+
+    def backupCurrentMaccelState(self):
+        return self.backend.backup()
+
+    def restorePreviousMaccelState(self):
+        self.backend.restore()
+        self._save_state("previous", str(MOUSE_BACKUP_PATH))
+
+    def runMaccelCommandSafely(self, command):
+        return self.backend._run(command)
+
+    def _apply_preset(self, active_preset, apply_callback):
+        backup_path = self.backupCurrentMaccelState()
+        try:
+            apply_callback()
+        except Exception:
+            self.backend.restore()
+            raise
+        self._save_state(active_preset, backup_path)
+
+    def _save_state(self, active_preset, backup_path):
+        config = load_app_config()
+        env = self.getEnvironment()
+        config["mouseMovement"] = {
+            "backend": "maccel",
+            "activePreset": active_preset,
+            "previousStateBackupPath": backup_path,
+            "lastAppliedAt": iso_now(),
+            "sessionType": env["sessionType"],
+            "desktop": env["desktop"],
+        }
+        save_app_config(config)
+
+    def _log_command(self, command):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with MOUSE_COMMAND_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(f"{iso_now()} {' '.join(command)}\n")
+
+
 class App(Gtk.ApplicationWindow):
     def __init__(self, application):
         super().__init__(application=application)
@@ -584,6 +776,7 @@ class App(Gtk.ApplicationWindow):
         self.profiles = []
         self.syncing_style = False
         self.syncing_features = False
+        self.mouse_service = MouseMovementService()
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
@@ -648,6 +841,50 @@ class App(Gtk.ApplicationWindow):
             "Use CopyQ for a smooth community-tested Super+V clipboard history popup.",
             self.on_clipboard_feature_toggled,
         )
+
+        mouse_card = self.create_card("Mouse Movement")
+        content.pack_start(mouse_card, False, False, 0)
+
+        mouse_title = Gtk.Label()
+        mouse_title.set_markup("<span size='large'><b>Mouse Movement</b></span>")
+        mouse_title.set_xalign(0)
+        mouse_card.pack_start(mouse_title, False, False, 0)
+
+        mouse_description = Gtk.Label(label="Make Linux mouse movement feel closer to Windows or macOS.")
+        mouse_description.set_xalign(0)
+        mouse_description.set_line_wrap(True)
+        mouse_card.pack_start(mouse_description, False, False, 0)
+
+        mouse_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        mouse_card.pack_start(mouse_grid, False, False, 0)
+
+        self.mouse_windows_button = self.create_primary_button("Windows", "Apply the Windows-like mouse movement preset.")
+        self.mouse_windows_button.connect("clicked", self.on_mouse_windows)
+        mouse_grid.attach(self.mouse_windows_button, 0, 0, 1, 1)
+
+        self.mouse_macos_button = self.create_primary_button("macOS", "Apply the macOS-like mouse movement preset.")
+        self.mouse_macos_button.connect("clicked", self.on_mouse_macos)
+        mouse_grid.attach(self.mouse_macos_button, 1, 0, 1, 1)
+
+        self.mouse_restore_button = Gtk.Button(label="Restore Previous")
+        self.mouse_restore_button.set_tooltip_text("Restore the mouse settings backed up before the last preset was applied.")
+        self.mouse_restore_button.connect("clicked", self.on_mouse_restore)
+        mouse_grid.attach(self.mouse_restore_button, 2, 0, 1, 1)
+
+        self.mouse_backend_label = Gtk.Label()
+        self.mouse_backend_label.set_xalign(0)
+        self.mouse_backend_label.set_line_wrap(True)
+        mouse_card.pack_start(self.mouse_backend_label, False, False, 0)
+
+        self.mouse_active_label = Gtk.Label()
+        self.mouse_active_label.set_xalign(0)
+        self.mouse_active_label.set_line_wrap(True)
+        mouse_card.pack_start(self.mouse_active_label, False, False, 0)
+
+        self.mouse_warning_label = Gtk.Label()
+        self.mouse_warning_label.set_xalign(0)
+        self.mouse_warning_label.set_line_wrap(True)
+        mouse_card.pack_start(self.mouse_warning_label, False, False, 0)
 
         setup_card = self.create_card("Manual Actions")
         content.pack_start(setup_card, False, False, 0)
@@ -721,6 +958,7 @@ class App(Gtk.ApplicationWindow):
         self.refresh_current_style()
         self.refresh_profiles()
         self.refresh_feature_state()
+        self.refresh_mouse_movement_state()
 
     def create_card(self, title):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -808,6 +1046,36 @@ class App(Gtk.ApplicationWindow):
         self.clipboard_switch.set_active(self.clipboard_feature_enabled())
         self.syncing_features = False
 
+    def refresh_mouse_movement_state(self):
+        env = self.mouse_service.getEnvironment()
+        supported = self.mouse_service.isSupportedPlatform()
+        maccel_available = supported and self.mouse_service.isMaccelInstalled()
+        self.mouse_windows_button.set_sensitive(maccel_available)
+        self.mouse_macos_button.set_sensitive(maccel_available)
+        self.mouse_restore_button.set_sensitive(maccel_available and MOUSE_BACKUP_PATH.exists())
+
+        if maccel_available:
+            self.mouse_backend_label.set_text("Backend: maccel detected")
+        else:
+            self.mouse_backend_label.set_text(
+                "Backend: maccel not installed\nThis feature requires the open-source maccel backend."
+            )
+
+        active = self.mouse_service.getCurrentPresetState()
+        active_label = {
+            "windows": "Windows",
+            "macos": "macOS",
+            "previous": "Previous",
+        }.get(active, "Custom / Previous / Unknown")
+        self.mouse_active_label.set_text(f"Active preset: {active_label}")
+
+        if env["sessionType"] == "wayland":
+            self.mouse_warning_label.set_text("Wayland support may depend on compositor behavior.")
+        elif not supported:
+            self.mouse_warning_label.set_text("Mouse Movement is only supported on Linux.")
+        else:
+            self.mouse_warning_label.set_text("")
+
     def refresh_current_style(self):
         current = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False)
         current = current.strip("'")
@@ -892,6 +1160,7 @@ class App(Gtk.ApplicationWindow):
         self.refresh_current_style()
         self.refresh_profiles()
         self.refresh_feature_state()
+        self.refresh_mouse_movement_state()
 
     def on_install_profiles(self, _button):
         try:
@@ -973,6 +1242,30 @@ class App(Gtk.ApplicationWindow):
             _switch.set_state(not state)
             self.refresh_feature_state()
         return True
+
+    def on_mouse_windows(self, _button):
+        try:
+            self.mouse_service.applyWindowsPreset()
+            self.log("Active preset: Windows")
+        except Exception as error:
+            self.log(f"Failed to apply Windows mouse movement: {error}")
+        self.refresh_mouse_movement_state()
+
+    def on_mouse_macos(self, _button):
+        try:
+            self.mouse_service.applyMacOSPreset()
+            self.log("Active preset: macOS")
+        except Exception as error:
+            self.log(f"Failed to apply macOS-like mouse movement: {error}")
+        self.refresh_mouse_movement_state()
+
+    def on_mouse_restore(self, _button):
+        try:
+            self.mouse_service.restorePreviousMaccelState()
+            self.log("Previous mouse settings restored")
+        except Exception as error:
+            self.log(f"Failed to restore previous mouse settings: {error}")
+        self.refresh_mouse_movement_state()
 
     def on_style_toggled(self, button, action):
         if self.syncing_style:
