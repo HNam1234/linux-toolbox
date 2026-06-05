@@ -26,7 +26,14 @@ CLIPBOARD_SHORTCUT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-
 COPYQ_AUTOSTART = AUTOSTART_DIR / "copyq.desktop"
 COPYQ_SHORTCUT = BIN_DIR / "copyq-super-v"
 COPYQ_START = BIN_DIR / "copyq-start"
+COPYQ_CLEAR = BIN_DIR / "copyq-clear"
 COPYQ_SERVICE = SYSTEMD_USER_DIR / "copyq.service"
+CLIPBOARD_SHORTCUT_BINDING = "<Super>v"
+# GNOME binds <Super>v to the notification tray by default, which steals the key
+# from CopyQ. We remove it from this binding (keeping the rest) so Super+V is
+# reliable, and restore it when the feature is turned off.
+GNOME_TRAY_SCHEMA = "org.gnome.shell.keybindings"
+GNOME_TRAY_KEY = "toggle-message-tray"
 CONFIG_DIR = HOME / ".config/chrome-dock-profiles"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 MOUSE_APPLY_ON_LOGIN = BIN_DIR / "chrome-dock-profiles-apply-mouse"
@@ -2183,25 +2190,41 @@ class App(Gtk.ApplicationWindow):
         clipboard_description.set_line_wrap(True)
         clipboard_tab.pack_start(clipboard_description, False, False, 0)
 
-        clipboard_card = self.create_card("Clipboard History", "Keep CopyQ running after login and use Super+V.")
+        clipboard_card = self.create_card("Clipboard History", "CopyQ keeps a history of what you copy. Pick the parts you want.")
         clipboard_tab.pack_start(clipboard_card, False, False, 0)
 
-        self.clipboard_switch = self.create_feature_switch(
+        self.clipboard_autostart_check, self.clipboard_autostart_pill = self.create_feature_check(
             clipboard_card,
-            "Clipboard History + Startup (CopyQ)",
-            "Keep CopyQ running after login and use Super+V for clipboard history.",
-            self.on_clipboard_feature_toggled,
+            "Start CopyQ at login",
+            "Launch CopyQ automatically when you log in, so clipboard history is always running.",
+            self.on_clipboard_autostart_toggled,
         )
+        self.clipboard_shortcut_check, self.clipboard_shortcut_pill = self.create_feature_check(
+            clipboard_card,
+            "Super+V opens clipboard history",
+            "Bind Super+V to the CopyQ history popup. Frees Super+V from GNOME's notification tray so it works every time.",
+            self.on_clipboard_shortcut_toggled,
+        )
+
+        clipboard_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        clipboard_actions.set_margin_top(6)
+        clipboard_card.pack_start(clipboard_actions, False, False, 0)
+
+        self.clipboard_clear_button = Gtk.Button(label="Clear Clipboard")
+        self.clipboard_clear_button.set_tooltip_text("Erase CopyQ history and the current system clipboard.")
+        self.clipboard_clear_button.connect("clicked", self.on_clipboard_clear)
+        clipboard_actions.pack_start(self.clipboard_clear_button, False, False, 0)
+
+        self.clipboard_repair_button = Gtk.Button(label="Repair Clipboard")
+        self.clipboard_repair_button.set_tooltip_text("Recreate the CopyQ startup file, scripts, and Super+V shortcut.")
+        self.clipboard_repair_button.connect("clicked", self.on_clipboard_repair_startup)
+        clipboard_actions.pack_start(self.clipboard_repair_button, False, False, 0)
 
         self.clipboard_status_label = Gtk.Label()
         self.clipboard_status_label.set_xalign(0)
         self.clipboard_status_label.set_line_wrap(True)
+        self.clipboard_status_label.get_style_context().add_class("section-subtitle")
         clipboard_card.pack_start(self.clipboard_status_label, False, False, 0)
-
-        self.clipboard_repair_button = Gtk.Button(label="Repair Clipboard Startup")
-        self.clipboard_repair_button.set_tooltip_text("Recreate CopyQ autostart, user service, and Super+V shortcut.")
-        self.clipboard_repair_button.connect("clicked", self.on_clipboard_repair_startup)
-        clipboard_card.pack_start(self.clipboard_repair_button, False, False, 0)
 
         self.refresh_compatibility()
         self.refresh_current_style()
@@ -2334,6 +2357,40 @@ class App(Gtk.ApplicationWindow):
         parent.pack_start(row, False, False, 0)
         return switch
 
+    def create_feature_check(self, parent, title, detail, callback):
+        """A labeled checkbox row with a trailing status pill.
+
+        Returns (check_button, pill_label). The check emits `toggled`; handlers
+        should guard against programmatic updates using self.syncing_features.
+        """
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.set_margin_top(2)
+        row.set_margin_bottom(2)
+
+        check = Gtk.CheckButton()
+        check.set_valign(Gtk.Align.START)
+
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        label = Gtk.Label()
+        label.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>")
+        label.set_xalign(0)
+        description = Gtk.Label(label=detail)
+        description.set_xalign(0)
+        description.set_line_wrap(True)
+        description.get_style_context().add_class("section-subtitle")
+        copy.pack_start(label, False, False, 0)
+        copy.pack_start(description, False, False, 0)
+
+        pill = self.make_pill("Off", "warn")
+        pill.set_valign(Gtk.Align.CENTER)
+
+        check.connect("toggled", callback)
+        row.pack_start(check, False, False, 0)
+        row.pack_start(copy, True, True, 0)
+        row.pack_end(pill, False, False, 0)
+        parent.pack_start(row, False, False, 0)
+        return check, pill
+
     def log(self, message):
         self.status_label.set_text(message)
         buffer = self.log_view.get_buffer()
@@ -2378,7 +2435,9 @@ class App(Gtk.ApplicationWindow):
         self.syncing_features = True
         self.profile_switch.set_active(self.profile_feature_enabled())
         self.hover_switch.set_active(self.hover_feature_enabled())
-        self.clipboard_switch.set_active(self.clipboard_feature_enabled())
+        if hasattr(self, "clipboard_autostart_check"):
+            self.clipboard_autostart_check.set_active(self.clipboard_autostart_active())
+            self.clipboard_shortcut_check.set_active(self.clipboard_shortcut_active())
         self.syncing_features = False
         self.refresh_clipboard_state()
         self.refresh_overview_summary()
@@ -2387,17 +2446,26 @@ class App(Gtk.ApplicationWindow):
         if not hasattr(self, "clipboard_status_label"):
             return
         copyq_available = shutil.which("copyq") is not None
-        autostart_ready = COPYQ_AUTOSTART.exists()
-        service_ready = COPYQ_SERVICE.exists()
-        shortcut_ready = COPYQ_SHORTCUT.exists() and CLIPBOARD_SHORTCUT_PATH in parse_gsettings_list(
-            run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], check=False)
-        )
-        config_enabled = self.clipboard_config_enabled()
+        autostart_active = self.clipboard_autostart_active()
+        shortcut_active = self.clipboard_shortcut_active()
+        running = self._copyq_running()
+
+        if hasattr(self, "clipboard_autostart_pill"):
+            self.set_pill(self.clipboard_autostart_pill, "On" if autostart_active else "Off", "ok" if autostart_active else "warn")
+            self.set_pill(self.clipboard_shortcut_pill, "On" if shortcut_active else "Off", "ok" if shortcut_active else "warn")
+
+        # Controls depend on CopyQ being installed.
+        for widget in ("clipboard_autostart_check", "clipboard_shortcut_check", "clipboard_clear_button", "clipboard_repair_button"):
+            if hasattr(self, widget):
+                getattr(self, widget).set_sensitive(copyq_available)
+        if hasattr(self, "clipboard_clear_button"):
+            self.clipboard_clear_button.set_sensitive(copyq_available and running)
+
         lines = [
-            f"CopyQ: {'installed' if copyq_available else 'not installed'}",
-            f"Startup: {'enabled' if autostart_ready or service_ready else 'not enabled'}",
-            f"Super+V: {'configured' if shortcut_ready else 'not configured'}",
-            f"Saved setting: {'always run clipboard at login' if config_enabled else 'off'}",
+            f"CopyQ: {'installed' if copyq_available else 'not installed — toggle a setting to install'}",
+            f"Running now: {'yes' if running else 'no'}",
+            f"Start at login: {'on' if autostart_active else 'off'}",
+            f"Super+V popup: {'on' if shortcut_active else 'off'}",
         ]
         self.clipboard_status_label.set_text("\n".join(lines))
         self.refresh_overview_summary()
@@ -2550,6 +2618,10 @@ class App(Gtk.ApplicationWindow):
         for class_name in ("pill-ok", "pill-warn", "pill-err"):
             context.remove_class(class_name)
         context.add_class(f"pill-{level}")
+
+    def set_pill(self, pill, text, level):
+        pill.set_text(text)
+        self.set_widget_level(pill, level)
 
     def mouse_preset_label(self, preset, saved=False):
         labels = {
@@ -2752,38 +2824,74 @@ class App(Gtk.ApplicationWindow):
             self.refresh_feature_state()
         return True
 
-    def on_clipboard_feature_toggled(self, _switch, state):
+    def on_clipboard_autostart_toggled(self, check):
         if self.syncing_features:
-            return False
+            return
+        state = check.get_active()
         try:
             if state:
-                self.enable_copyq_clipboard()
-                self.log("Clipboard history enabled with CopyQ. It will start at login. Use Super+V.")
+                self.enable_copyq_autostart()
+                self.log("CopyQ will now start automatically at login.")
             else:
-                self.disable_copyq_clipboard()
-                self.log("Clipboard history disabled.")
-            _switch.set_state(state)
+                self.disable_copyq_autostart()
+                self.log("CopyQ login autostart turned off.")
             self.refresh_compatibility()
             self.refresh_feature_state()
         except Exception as error:
-            self.log(f"Failed to update clipboard history: {error}")
-            _switch.set_state(not state)
+            self.log(f"Failed to update CopyQ autostart: {error}")
             self.refresh_feature_state()
-        return True
+
+    def on_clipboard_shortcut_toggled(self, check):
+        if self.syncing_features:
+            return
+        state = check.get_active()
+        try:
+            if state:
+                self.enable_copyq_shortcut()
+                self.log("Super+V now opens clipboard history. (Notification tray moved to Super+M.)")
+            else:
+                self.disable_copyq_shortcut()
+                self.log("Super+V clipboard shortcut turned off. GNOME's Super+V was restored.")
+            self.refresh_compatibility()
+            self.refresh_feature_state()
+        except Exception as error:
+            self.log(f"Failed to update Super+V shortcut: {error}")
+            self.refresh_feature_state()
+
+    def on_clipboard_clear(self, _button):
+        try:
+            self.clear_clipboard()
+            self.log("Clipboard history and current clipboard cleared.")
+        except Exception as error:
+            self.log(f"Failed to clear clipboard: {error}")
+        self.refresh_clipboard_state()
 
     def on_clipboard_repair_startup(self, _button):
         try:
-            self.enable_copyq_clipboard()
-            self.log("Clipboard startup repaired. CopyQ will run at login and Super+V is configured.")
+            want_autostart = self.clipboard_autostart_check.get_active() if hasattr(self, "clipboard_autostart_check") else True
+            want_shortcut = self.clipboard_shortcut_check.get_active() if hasattr(self, "clipboard_shortcut_check") else True
+            if not want_autostart and not want_shortcut:
+                # Nothing ticked: repair both so the user gets a working setup.
+                want_autostart = want_shortcut = True
+            if want_autostart:
+                self.enable_copyq_autostart(quiet=True)
+            if want_shortcut:
+                self.enable_copyq_shortcut(quiet=True)
+            self.log("Clipboard repaired. CopyQ scripts, autostart, and Super+V were recreated.")
         except Exception as error:
-            self.log(f"Failed to repair clipboard startup: {error}")
+            self.log(f"Failed to repair clipboard: {error}")
         self.refresh_feature_state()
 
     def ensure_startup_features_once(self):
-        if self.clipboard_config_enabled():
+        want_autostart = self.clipboard_autostart_saved()
+        want_shortcut = self.clipboard_shortcut_saved()
+        if want_autostart or want_shortcut:
             if shutil.which("copyq"):
                 try:
-                    self.enable_copyq_clipboard(allow_install=False, quiet=True)
+                    if want_autostart:
+                        self.enable_copyq_autostart(allow_install=False, quiet=True)
+                    if want_shortcut:
+                        self.enable_copyq_shortcut(allow_install=False, quiet=True)
                     self.log("Clipboard startup checked.")
                 except Exception as error:
                     self.log(f"Clipboard startup check failed: {error}")
@@ -3185,27 +3293,91 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
         enabled = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False))
         return "dock-window-preview@quivio" in enabled
 
-    def enable_copyq_clipboard(self, allow_install=True, quiet=False):
-        self.ensure_copyq_installed(allow_install=allow_install)
+    def _write_copyq_scripts(self):
         BIN_DIR.mkdir(parents=True, exist_ok=True)
-        AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
-        SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+        # Launcher used by autostart. CopyQ is single-instance, so this is safe
+        # to run even if a server is already up. Runs the server in foreground so
+        # the session tracks it as a live process (no broken `wait`).
         COPYQ_START.write_text(
             """#!/usr/bin/env bash
-set -e
-
-if ! pgrep -x copyq >/dev/null 2>&1; then
-  copyq >/dev/null 2>&1 &
-  sleep 0.8
-fi
+set -u
 
 copyq config item_popup_interval 0 >/dev/null 2>&1 || true
 copyq config native_notifications false >/dev/null 2>&1 || true
-wait
+
+if pgrep -x copyq >/dev/null 2>&1; then
+  exit 0
+fi
+
+exec copyq
 """,
             encoding="utf-8",
         )
         COPYQ_START.chmod(0o755)
+        # Super+V popup. Ensures the server is up, then toggles the history window.
+        COPYQ_SHORTCUT.write_text(
+            """#!/usr/bin/env bash
+set -u
+
+if ! pgrep -x copyq >/dev/null 2>&1; then
+  copyq >/dev/null 2>&1 &
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -x copyq >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+fi
+
+copyq config item_popup_interval 0 >/dev/null 2>&1 || true
+exec copyq toggle
+""",
+            encoding="utf-8",
+        )
+        COPYQ_SHORTCUT.chmod(0o755)
+        # Clear history + the current system clipboard/selection.
+        COPYQ_CLEAR.write_text(
+            """#!/usr/bin/env bash
+set -u
+
+if ! pgrep -x copyq >/dev/null 2>&1; then
+  exit 0
+fi
+
+copyq eval -- '
+  var n = count();
+  if (n > 0) {
+    var rows = [];
+    for (var i = 0; i < n; ++i) rows.push(i);
+    remove.apply(this, rows);
+  }
+  copy("");
+  copySelection("");
+' >/dev/null 2>&1 || true
+""",
+            encoding="utf-8",
+        )
+        COPYQ_CLEAR.chmod(0o755)
+
+    def reassign_gnome_super_v(self):
+        # Remove <Super>v from GNOME's notification-tray binding so CopyQ owns it.
+        current = parse_gsettings_list(
+            run(["gsettings", "get", GNOME_TRAY_SCHEMA, GNOME_TRAY_KEY], check=False)
+        )
+        kept = [item for item in current if item not in ("<Super>v", "<Super>V")]
+        if kept != current:
+            run(["gsettings", "set", GNOME_TRAY_SCHEMA, GNOME_TRAY_KEY, format_gsettings_list(kept)])
+
+    def restore_gnome_super_v(self):
+        current = parse_gsettings_list(
+            run(["gsettings", "get", GNOME_TRAY_SCHEMA, GNOME_TRAY_KEY], check=False)
+        )
+        if "<Super>v" not in current and "<Super>V" not in current:
+            current.append("<Super>v")
+            run(["gsettings", "set", GNOME_TRAY_SCHEMA, GNOME_TRAY_KEY, format_gsettings_list(current)])
+
+    def enable_copyq_autostart(self, allow_install=True, quiet=False):
+        self.ensure_copyq_installed(allow_install=allow_install)
+        AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+        self._write_copyq_scripts()
         COPYQ_AUTOSTART.write_text(
             f"""[Desktop Entry]
 Type=Application
@@ -3219,66 +3391,76 @@ X-GNOME-Autostart-Delay=2
             encoding="utf-8",
         )
         COPYQ_AUTOSTART.chmod(0o644)
-        COPYQ_SERVICE.write_text(
-            f"""[Unit]
-Description=CopyQ clipboard manager
-After=graphical-session.target
-PartOf=graphical-session.target
+        if not self._copyq_running():
+            subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        run(["copyq", "config", "item_popup_interval", "0"], check=False)
+        run(["copyq", "config", "native_notifications", "false"], check=False)
+        self.save_clipboard_config(autostart=True)
+        if not quiet:
+            self.refresh_clipboard_state()
 
-[Service]
-Type=simple
-ExecStart={COPYQ_START}
-Restart=on-failure
-RestartSec=2
+    def disable_copyq_autostart(self, quiet=False):
+        COPYQ_AUTOSTART.unlink(missing_ok=True)
+        # Clean up the legacy systemd user service if a previous version made one.
+        if COPYQ_SERVICE.exists():
+            run(["systemctl", "--user", "disable", "--now", "copyq.service"], check=False)
+            COPYQ_SERVICE.unlink(missing_ok=True)
+            run(["systemctl", "--user", "daemon-reload"], check=False)
+        self.save_clipboard_config(autostart=False)
+        if not quiet:
+            self.refresh_clipboard_state()
 
-[Install]
-WantedBy=default.target
-""",
-            encoding="utf-8",
-        )
-        COPYQ_SHORTCUT.write_text(
-            """#!/usr/bin/env bash
-set -e
-
-if ! pgrep -x copyq >/dev/null 2>&1; then
-  copyq >/dev/null 2>&1 &
-  sleep 0.5
-fi
-
-copyq config item_popup_interval 0 >/dev/null 2>&1 || true
-copyq config native_notifications false >/dev/null 2>&1 || true
-exec copyq show
-""",
-            encoding="utf-8",
-        )
-        COPYQ_SHORTCUT.chmod(0o755)
+    def enable_copyq_shortcut(self, allow_install=True, quiet=False):
+        self.ensure_copyq_installed(allow_install=allow_install)
+        self._write_copyq_scripts()
+        self.reassign_gnome_super_v()
         self.configure_custom_shortcut(
             CLIPBOARD_SHORTCUT_PATH,
             "Clipboard History",
             str(COPYQ_SHORTCUT),
-            "<Super>v",
+            CLIPBOARD_SHORTCUT_BINDING,
         )
-        subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        run(["copyq", "config", "item_popup_interval", "0"], check=False)
-        run(["copyq", "config", "native_notifications", "false"], check=False)
-        run(["systemctl", "--user", "daemon-reload"], check=False)
-        run(["systemctl", "--user", "enable", "--now", "copyq.service"], check=False)
-        self.save_clipboard_config(True)
+        if not self._copyq_running():
+            subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.save_clipboard_config(shortcut=True)
         if not quiet:
             self.refresh_clipboard_state()
 
-    def disable_copyq_clipboard(self):
-        COPYQ_AUTOSTART.unlink(missing_ok=True)
-        COPYQ_SHORTCUT.unlink(missing_ok=True)
-        COPYQ_START.unlink(missing_ok=True)
-        run(["systemctl", "--user", "disable", "--now", "copyq.service"], check=False)
-        COPYQ_SERVICE.unlink(missing_ok=True)
-        run(["systemctl", "--user", "daemon-reload"], check=False)
+    def disable_copyq_shortcut(self, quiet=False):
         self.remove_custom_shortcut(CLIPBOARD_SHORTCUT_PATH)
+        self.restore_gnome_super_v()
+        self.save_clipboard_config(shortcut=False)
+        if not quiet:
+            self.refresh_clipboard_state()
+
+    def clear_clipboard(self):
+        if not shutil.which("copyq"):
+            raise RuntimeError("CopyQ is not installed.")
+        self._write_copyq_scripts()
+        if not self._copyq_running():
+            subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        run([str(COPYQ_CLEAR)], check=False)
+
+    def _copyq_running(self):
+        return run(["pgrep", "-x", "copyq"], check=False).strip() != ""
+
+    def enable_copyq_clipboard(self, allow_install=True, quiet=False):
+        # Composite: turn on both parts (used by Repair and startup self-heal).
+        self.enable_copyq_autostart(allow_install=allow_install, quiet=True)
+        self.enable_copyq_shortcut(allow_install=allow_install, quiet=True)
+        if not quiet:
+            self.refresh_clipboard_state()
+
+    def disable_copyq_clipboard(self, quiet=False):
+        self.disable_copyq_autostart(quiet=True)
+        self.disable_copyq_shortcut(quiet=True)
+        COPYQ_START.unlink(missing_ok=True)
+        COPYQ_SHORTCUT.unlink(missing_ok=True)
+        COPYQ_CLEAR.unlink(missing_ok=True)
         if shutil.which("copyq"):
             run(["copyq", "exit"], check=False)
-        self.save_clipboard_config(False)
-        self.refresh_clipboard_state()
+        if not quiet:
+            self.refresh_clipboard_state()
 
     def ensure_copyq_installed(self, allow_install=True):
         if shutil.which("copyq"):
@@ -3290,22 +3472,39 @@ exec copyq show
         self.log("CopyQ is not installed. Ubuntu will ask for your password to install it.")
         run(["pkexec", "apt-get", "install", "-y", "copyq"])
 
-    def save_clipboard_config(self, enabled):
+    def save_clipboard_config(self, autostart=None, shortcut=None):
         config = load_app_config()
+        existing = config.get("clipboard") if isinstance(config.get("clipboard"), dict) else {}
+        new_autostart = existing.get("autoStart", False) if autostart is None else bool(autostart)
+        new_shortcut = existing.get("shortcut", False) if shortcut is None else bool(shortcut)
         config["clipboard"] = {
-            "enabled": bool(enabled),
-            "autoStart": bool(enabled),
+            "enabled": bool(new_autostart or new_shortcut),
+            "autoStart": new_autostart,
+            "shortcut": new_shortcut,
             "backend": "copyq",
-            "shortcut": "<Super>v",
+            "shortcutBinding": CLIPBOARD_SHORTCUT_BINDING,
             "lastUpdatedAt": iso_now(),
         }
         save_app_config(config)
+
 
     def clipboard_config_enabled(self):
         clipboard_state = load_app_config().get("clipboard")
         if isinstance(clipboard_state, dict) and "enabled" in clipboard_state:
             return bool(clipboard_state.get("enabled"))
         return bool(COPYQ_SHORTCUT.exists() and (COPYQ_AUTOSTART.exists() or COPYQ_SERVICE.exists()))
+
+    def clipboard_autostart_saved(self):
+        state = load_app_config().get("clipboard")
+        if isinstance(state, dict) and "autoStart" in state:
+            return bool(state.get("autoStart"))
+        return COPYQ_AUTOSTART.exists()
+
+    def clipboard_shortcut_saved(self):
+        state = load_app_config().get("clipboard")
+        if isinstance(state, dict) and "shortcut" in state:
+            return bool(state.get("shortcut"))
+        return COPYQ_SHORTCUT.exists()
 
     def configure_custom_shortcut(self, path, name, command, binding):
         current = parse_gsettings_list(
@@ -3329,15 +3528,20 @@ exec copyq show
         ]
         run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", format_gsettings_list(current)])
 
-    def clipboard_feature_enabled(self):
-        config_enabled = self.clipboard_config_enabled()
+    def clipboard_autostart_active(self):
+        return shutil.which("copyq") is not None and COPYQ_AUTOSTART.exists()
+
+    def clipboard_shortcut_active(self):
         if not shutil.which("copyq") or not COPYQ_SHORTCUT.exists():
             return False
         current = parse_gsettings_list(
             run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], check=False)
         )
-        files_ready = CLIPBOARD_SHORTCUT_PATH in current and (COPYQ_AUTOSTART.exists() or COPYQ_SERVICE.exists())
-        return config_enabled and files_ready
+        return CLIPBOARD_SHORTCUT_PATH in current
+
+    def clipboard_feature_enabled(self):
+        # Composite used by the Overview summary: on when either part is active.
+        return self.clipboard_autostart_active() or self.clipboard_shortcut_active()
 
 
 class ChromeDockProfiles(Gtk.Application):
