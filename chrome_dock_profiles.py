@@ -2145,8 +2145,6 @@ class App(Gtk.ApplicationWindow):
         summary_card.pack_start(self.overview_summary_box, False, False, 0)
 
         self.overview_restore_card = self.create_card("Restore Original", "Undo Linux Toolbox changes from one place.")
-        self.overview_restore_card.set_no_show_all(True)
-        self.overview_restore_card.hide()
         main_tab.pack_start(self.overview_restore_card, False, False, 0)
         self.overview_restore_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
         self.overview_restore_card.pack_start(self.overview_restore_grid, False, False, 0)
@@ -2164,7 +2162,6 @@ class App(Gtk.ApplicationWindow):
         ):
             button = Gtk.Button(label=title)
             button.set_tooltip_text(tooltip)
-            button.set_no_show_all(True)
             button.connect("clicked", handler)
             self.overview_restore_grid.attach(button, index % 3, index // 3, 1, 1)
             self.overview_restore_buttons[key] = button
@@ -3327,7 +3324,6 @@ class App(Gtk.ApplicationWindow):
     def refresh_overview_restore_actions(self):
         if not hasattr(self, "overview_restore_buttons"):
             return
-        visible_any = False
 
         try:
             ai_config = self.aitools_service.configStatus(self.aitools_config())
@@ -3387,10 +3383,9 @@ class App(Gtk.ApplicationWindow):
         }
         for key, (visible, sensitive) in states.items():
             button = self.overview_restore_buttons[key]
-            button.set_visible(visible)
+            button.set_visible(True)
             button.set_sensitive(sensitive)
-            visible_any = visible_any or visible
-        self.overview_restore_card.set_visible(visible_any)
+        self.overview_restore_card.set_visible(True)
 
     def refresh_aitools_state(self):
         if not hasattr(self, "aitools_status_label"):
