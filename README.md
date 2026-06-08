@@ -4,7 +4,7 @@ Set-and-forget Ubuntu GNOME utilities for a more Windows-like desktop workflow. 
 
 - Separate dock icons for each Chrome/Chromium profile.
 - Simple AI login and terminal command setup.
-- A Windows-style horizontal dock preset for Ubuntu Dock.
+- A Windows-style horizontal dock preset for Ubuntu Dock, with restore back to the original layout.
 - `Super+V` clipboard history popup powered by CopyQ.
 - Simple Windows/macOS-like mouse movement presets powered by maccel.
 
@@ -27,31 +27,53 @@ linux-toolbox
 The app gives you a guided tabbed GUI with:
 
 - A Main tab with system overview and activity.
-- An AI Tools tab for saving a Bifrost key, opening OpenAI/Codex login, opening Claude web login, and installing terminal commands.
+- An AI Tools tab with separate Codex CLI, Claude CLI, Codex VS Code, and Claude VS Code configs.
 - Detected Chrome/Chromium profile cards.
 - One-click install/update for profile dock icons.
 - One-click pinning to Ubuntu Dock.
-- A Windows taskbar-style dock layout toggle with Ubuntu default restore.
+- A Windows taskbar-style dock layout toggle with original-layout restore.
 - Dock click style choices.
 - Hover preview extension installation.
 - A Clipboard tab with CopyQ clipboard history toggle and `Super+V` binding.
-- A Mouse Movement tab with install status, maccel installer progress, Windows, macOS, and Restore Previous buttons.
+- A Mouse Movement tab with install status, maccel installer progress, Windows, macOS, and Restore Original buttons.
 
 The old `chrome-dock-profiles` command is still installed as a compatibility alias for existing users.
+
+## AI Tools
+
+Set it up once:
+
+1. Use the overview table to see which mode each real config is using and whether it is configured.
+2. Click **Edit** on a row to open that target's config popup.
+3. In the popup, choose **Bifrost** or **Web login**. If a target uses Bifrost, paste its URL/key/model. If it uses Web login, set an account label.
+4. Click **Install / Update bicodex** or **Install / Update biclaude** to refresh terminal wrappers.
+5. Use **Bifrost Token Usage** to open `https://bifrost.sotatek.works/portal` and check API-key token usage.
+
+Then use these from any terminal:
+
+```bash
+codex
+claude
+bicodex
+biclaude
+```
 
 ## What It Does
 
 - Detects Chrome/Chromium profiles.
-- Stores a shared Bifrost URL/key in Linux Toolbox config.
-- Installs `biclaude` and `bicodex` into `~/.local/bin`.
-- Opens `codex login` for personal OpenAI/Codex auth.
-- Opens `claude auth login` for personal Claude web auth.
-- Leaves personal `codex` and `claude` separate from Bifrost wrappers.
+- Stores split AI config in Linux Toolbox config: `codexCli`, `claudeCli`, `codexVscode`, and `claudeVscode`.
+- Reads the current wrapper/config files back from disk so the overview reflects actual state, not only saved UI values.
+- Lets each AI target choose Bifrost or web login independently.
+- Keeps the main AI Tools page as an overview table; detailed config opens in per-target popups.
+- Installs `bicodex` with either a dedicated Bifrost `CODEX_HOME` at `~/.config/linux-toolbox/codex-bifrost` or a clean web-login wrapper.
+- Installs `biclaude` with either its own Bifrost environment wrapper or a clean web-login wrapper.
+- Can write Bifrost config for Codex VS Code in `~/.codex/config.toml`, or open `codex login` for web auth.
+- Can write Bifrost env settings for Claude in `~/.claude/settings.json`, or open `claude auth login` for web auth.
 - Creates one `.desktop` launcher per profile.
 - Uses each profile picture as the dock icon when available.
 - Pins the profile launchers to Ubuntu Dock.
 - Moves Ubuntu Dock to a bottom, full-width, always-visible Windows-style taskbar layout with Show Applications on the left.
-- Lets you toggle back to the Ubuntu default dock layout or restore the previous saved dock layout.
+- Lets you toggle back to the Ubuntu default dock layout or restore the original saved dock layout.
 - Lets you choose dock click behavior:
   - Smooth Minimize
   - Minimize + Previews
@@ -102,7 +124,7 @@ If `maccel` is available in `PATH`, open **Linux Toolbox** and use:
 
 - **Windows** for a Windows Enhanced Pointer Precision-like approximation.
 - **macOS** for a smooth macOS-like approximation.
-- **Restore Previous** to restore the maccel settings backed up before the last preset.
+- **Restore Original** to restore the maccel settings backed up before Linux Toolbox changed them.
 
 On Wayland, support may depend on compositor behavior.
 

@@ -3,11 +3,13 @@ import ast
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import stat
 import subprocess
 import sys
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,7 +21,7 @@ if SRC_DIR.exists():
     sys.path.insert(0, str(SRC_DIR))
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib, Gdk  # noqa: E402
+from gi.repository import Gtk, GLib, Gdk, Pango  # noqa: E402
 
 from linux_toolbox.resources import load_template, load_text  # noqa: E402
 
@@ -42,18 +44,37 @@ CLIPBOARD_SHORTCUT_BINDING = "<Super>v"
 AITOOLS_DESKTOP_ID = "aitools.desktop"
 AITOOLS_DESKTOP = APP_DIR / AITOOLS_DESKTOP_ID
 AITOOLS_WRAPPER = BIN_DIR / "linux-toolbox-aitools"
+CONFIG_DIR = HOME / ".config/chrome-dock-profiles"
+CONFIG_PATH = CONFIG_DIR / "config.json"
+VSCODE_AI_TOOLS_INIT = CONFIG_DIR / "vscode-ai-tools.sh"
 BICLAUDE_COMMAND = BIN_DIR / "biclaude"
 BICODEX_COMMAND = BIN_DIR / "bicodex"
+# Codex reads ~/.codex/config.toml globally, which both the VS Code extension
+# and the plain `codex` command share. To keep personal (web login) Codex
+# separate from Bifrost, bicodex points CODEX_HOME at this dedicated home so
+# the Bifrost/Sotatek provider lives only here and never leaks into VS Code.
+CODEX_BIFROST_HOME = HOME / ".config/linux-toolbox/codex-bifrost"
+CODEX_VSCODE_HOME = HOME / ".codex"
+CODEX_VSCODE_CONFIG = CODEX_VSCODE_HOME / "config.toml"
+CLAUDE_HOME = HOME / ".claude"
+CLAUDE_SETTINGS = CLAUDE_HOME / "settings.json"
+AITOOLS_MANAGED_MARKER = "Managed by Linux Toolbox AI Tools"
+BIFROST_PORTAL_URL = "https://bifrost.sotatek.works/portal"
+AITOOLS_TARGETS = (
+    ("codexCli", "Codex CLI", "codex", BICODEX_COMMAND),
+    ("claudeCli", "Claude CLI", "claude", BICLAUDE_COMMAND),
+    ("codexVscode", "Codex Plugin VS Code", "codex", CODEX_VSCODE_CONFIG),
+    ("claudeVscode", "Claude Plugin VS Code", "claude", CLAUDE_SETTINGS),
+)
 # GNOME binds <Super>v to the notification tray by default, which steals the key
 # from CopyQ. We remove it from this binding (keeping the rest) so Super+V is
 # reliable, and restore it when the feature is turned off.
 GNOME_TRAY_SCHEMA = "org.gnome.shell.keybindings"
 GNOME_TRAY_KEY = "toggle-message-tray"
-CONFIG_DIR = HOME / ".config/chrome-dock-profiles"
-CONFIG_PATH = CONFIG_DIR / "config.json"
 MOUSE_APPLY_ON_LOGIN = BIN_DIR / "chrome-dock-profiles-apply-mouse"
 MOUSE_AUTOSTART = AUTOSTART_DIR / "chrome-dock-profiles-mouse.desktop"
 MOUSE_BACKUP_PATH = CONFIG_DIR / "maccel-previous-state.json"
+MOUSE_ORIGINAL_BACKUP_PATH = CONFIG_DIR / "maccel-original-state.json"
 MOUSE_COMMAND_LOG = CONFIG_DIR / "mouse-movement-commands.log"
 MOUSE_INSTALLER = BIN_DIR / "chrome-dock-profiles-install-maccel"
 MOUSE_INSTALL_LOG = CONFIG_DIR / "maccel-install.log"
@@ -65,6 +86,7 @@ VIETNAMESE_INPUT_LOG = CONFIG_DIR / "vietnamese-input.log"
 BAMBOO_CONFIG_DIR = HOME / ".config/ibus-bamboo"
 BAMBOO_CONFIG_PATH = BAMBOO_CONFIG_DIR / "ibus-bamboo.config.json"
 BAMBOO_CONFIG_BACKUP_PATH = CONFIG_DIR / "ibus-bamboo.config.json.backup"
+BAMBOO_ORIGINAL_CONFIG_BACKUP_PATH = CONFIG_DIR / "ibus-bamboo.config.json.original"
 GNOME_INPUT_SOURCES_SCHEMA = "org.gnome.desktop.input-sources"
 GNOME_INPUT_SOURCES_KEY = "sources"
 BAMBOO_INPUT_SOURCE = ("ibus", "Bamboo")
@@ -291,10 +313,24 @@ class MaccelBackend:
         MOUSE_BACKUP_PATH.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
         return str(MOUSE_BACKUP_PATH)
 
+    def backupOriginal(self):
+        if MOUSE_ORIGINAL_BACKUP_PATH.exists():
+            return str(MOUSE_ORIGINAL_BACKUP_PATH)
+        config = self.readCurrentConfig()
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        MOUSE_ORIGINAL_BACKUP_PATH.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+        return str(MOUSE_ORIGINAL_BACKUP_PATH)
+
     def restore(self):
         if not MOUSE_BACKUP_PATH.exists():
             raise RuntimeError("No previous mouse settings backup was found.")
         config = json.loads(MOUSE_BACKUP_PATH.read_text(encoding="utf-8"))
+        self.writeConfig(config)
+
+    def restoreOriginal(self):
+        if not MOUSE_ORIGINAL_BACKUP_PATH.exists():
+            raise RuntimeError("No original mouse settings backup was found.")
+        config = json.loads(MOUSE_ORIGINAL_BACKUP_PATH.read_text(encoding="utf-8"))
         self.writeConfig(config)
 
     def _read_mode(self):
@@ -714,11 +750,17 @@ class MouseMovementService:
         return applied
 
     def backupCurrentMaccelState(self):
+        self.backend.backupOriginal()
         return self.backend.backup()
 
     def restorePreviousMaccelState(self):
         self.backend.restore()
         self._save_state("previous", str(MOUSE_BACKUP_PATH))
+        self.ensureMouseAutostart()
+
+    def restoreOriginalMaccelState(self):
+        self.backend.restoreOriginal()
+        self._save_state("original", str(MOUSE_ORIGINAL_BACKUP_PATH))
         self.ensureMouseAutostart()
 
     def runMaccelCommandSafely(self, command):
@@ -866,12 +908,12 @@ class VietnameseInputService:
     def classify_status(self, diagnostics):
         if not diagnostics["ibusInstalled"] or not diagnostics["bambooInstalled"]:
             return "Needs install"
-        if self._saved_needs_logout():
-            return "Needs logout/login"
         if not diagnostics["ibusDaemonRunning"]:
             return "Needs restart"
         if diagnostics["framework"] != "IBus" or not diagnostics["bambooSourceActive"]:
             return "Misconfigured"
+        if self._saved_needs_logout():
+            self.clear_needs_logout()
         return "Ready"
 
     def detect_os(self):
@@ -1017,11 +1059,20 @@ class VietnameseInputService:
             return ""
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copy2(BAMBOO_CONFIG_PATH, BAMBOO_CONFIG_BACKUP_PATH)
+        if not BAMBOO_ORIGINAL_CONFIG_BACKUP_PATH.exists():
+            shutil.copy2(BAMBOO_CONFIG_PATH, BAMBOO_ORIGINAL_CONFIG_BACKUP_PATH)
         return str(BAMBOO_CONFIG_BACKUP_PATH)
 
     def save_previous_settings(self, previous_sources, previous_framework, bamboo_backup):
         config = load_app_config()
+        existing = config.get("vietnameseInput")
+        if not isinstance(existing, dict):
+            existing = {}
         config["vietnameseInput"] = {
+            "originalInputSources": existing.get("originalInputSources") or previous_sources,
+            "originalInputMethod": existing.get("originalInputMethod") or previous_framework,
+            "originalBambooConfigBackupPath": existing.get("originalBambooConfigBackupPath")
+            or (str(BAMBOO_ORIGINAL_CONFIG_BACKUP_PATH) if BAMBOO_ORIGINAL_CONFIG_BACKUP_PATH.exists() else ""),
             "previousInputSources": previous_sources,
             "previousInputMethod": previous_framework,
             "previousBambooConfigBackupPath": bamboo_backup,
@@ -1045,15 +1096,15 @@ class VietnameseInputService:
         if not isinstance(state, dict):
             raise RuntimeError("No Vietnamese input backup was found.")
 
-        previous_sources = state.get("previousInputSources")
+        previous_sources = state.get("originalInputSources") or state.get("previousInputSources")
         if previous_sources:
             run(["gsettings", "set", GNOME_INPUT_SOURCES_SCHEMA, GNOME_INPUT_SOURCES_KEY, previous_sources])
 
-        previous_method = state.get("previousInputMethod")
+        previous_method = state.get("originalInputMethod") or state.get("previousInputMethod")
         if previous_method and shutil.which("im-config"):
             run(["im-config", "-n", previous_method], check=False)
 
-        backup_path = state.get("previousBambooConfigBackupPath")
+        backup_path = state.get("originalBambooConfigBackupPath") or state.get("previousBambooConfigBackupPath")
         if backup_path and Path(backup_path).exists():
             BAMBOO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup_path, BAMBOO_CONFIG_PATH)
@@ -1071,6 +1122,16 @@ class VietnameseInputService:
         state = load_app_config().get("vietnameseInput")
         return isinstance(state, dict) and bool(state.get("needsLogout"))
 
+    def clear_needs_logout(self):
+        config = load_app_config()
+        state = config.get("vietnameseInput")
+        if not isinstance(state, dict) or not state.get("needsLogout"):
+            return
+        state["needsLogout"] = False
+        state["logoutSatisfiedAt"] = iso_now()
+        config["vietnameseInput"] = state
+        save_app_config(config)
+
     def latest_log_text(self, limit=220):
         if not VIETNAMESE_INPUT_LOG.exists():
             return ""
@@ -1082,6 +1143,247 @@ class VietnameseInputService:
 
 
 class AIToolsService:
+    def defaultMode(self, target):
+        return "web" if target in {"codexVscode", "claudeVscode"} else "bifrost"
+
+    def targetConfig(self, config=None, target="codexCli"):
+        config = config or {}
+        raw = config.get(target, {})
+        if not isinstance(raw, dict):
+            raw = {}
+
+        legacy_model = str(config.get("selectedModel", "")).strip()
+        legacy_mode = config.get("connectionMode") if target in {"codexCli", "claudeCli"} else None
+        mode = str(raw.get("connectionMode") or legacy_mode or self.defaultMode(target)).strip()
+        if mode not in {"bifrost", "web"}:
+            mode = self.defaultMode(target)
+        defaults = {
+            "connectionMode": mode,
+            "bifrostBaseUrl": raw.get("bifrostBaseUrl") or config.get("bifrostBaseUrl", ""),
+            "bifrostToken": raw.get("bifrostToken") or config.get("bifrostToken", ""),
+            "selectedModel": raw.get("selectedModel") or legacy_model,
+            "accountLabel": raw.get("accountLabel") or "",
+        }
+        return {key: str(value).strip() for key, value in defaults.items() if value is not None}
+
+    def vscodeTargetConfig(self, config=None, target="codexVscode"):
+        return self.targetConfig(config, target)
+
+    def actualTargetConfig(self, config=None, target="codexCli"):
+        saved = self.targetConfig(config, target)
+        actual = dict(saved)
+        actual["source"] = "saved"
+
+        if target == "codexCli":
+            wrapper = self.readShellWrapper(BICODEX_COMMAND)
+            if wrapper.get("exists"):
+                actual["source"] = str(BICODEX_COMMAND)
+                codex_home = wrapper.get("CODEX_HOME")
+                if codex_home:
+                    codex = self.readCodexConfig(Path(codex_home))
+                    actual.update({key: value for key, value in codex.items() if value})
+                    actual["connectionMode"] = "bifrost" if codex.get("bifrost") else "web"
+                elif wrapper.get("unset_CODEX_HOME"):
+                    actual["connectionMode"] = "web"
+                    global_codex = self.readCodexConfig(CODEX_VSCODE_HOME)
+                    if global_codex.get("bifrost"):
+                        actual.update({key: value for key, value in global_codex.items() if value})
+                        actual["connectionMode"] = "bifrost"
+            elif (CODEX_BIFROST_HOME / "config.toml").exists():
+                codex = self.readCodexConfig(CODEX_BIFROST_HOME)
+                actual.update({key: value for key, value in codex.items() if value})
+                actual["connectionMode"] = "bifrost" if codex.get("bifrost") else saved.get("connectionMode", "bifrost")
+                actual["source"] = str(CODEX_BIFROST_HOME / "config.toml")
+
+        elif target == "claudeCli":
+            wrapper = self.readShellWrapper(BICLAUDE_COMMAND)
+            if wrapper.get("exists"):
+                actual["source"] = str(BICLAUDE_COMMAND)
+                if wrapper.get("ANTHROPIC_BASE_URL") or wrapper.get("ANTHROPIC_AUTH_TOKEN") or wrapper.get("ANTHROPIC_API_KEY"):
+                    actual["connectionMode"] = "bifrost"
+                    actual["bifrostBaseUrl"] = wrapper.get("ANTHROPIC_BASE_URL", "")
+                    actual["bifrostToken"] = wrapper.get("ANTHROPIC_AUTH_TOKEN") or wrapper.get("ANTHROPIC_API_KEY") or ""
+                    actual["selectedModel"] = wrapper.get("ANTHROPIC_MODEL", "")
+                elif wrapper.get("unset_ANTHROPIC_BASE_URL") or wrapper.get("unset_ANTHROPIC_AUTH_TOKEN"):
+                    actual["connectionMode"] = "web"
+            else:
+                claude = self.readClaudeSettings()
+                if claude.get("bifrost"):
+                    actual.update({key: value for key, value in claude.items() if value})
+                    actual["connectionMode"] = "bifrost"
+                    actual["source"] = str(CLAUDE_SETTINGS)
+
+        elif target == "codexVscode":
+            codex = self.readCodexConfig(CODEX_VSCODE_HOME)
+            if codex.get("exists"):
+                actual.update({key: value for key, value in codex.items() if value})
+                actual["connectionMode"] = "bifrost" if codex.get("bifrost") else "web"
+                actual["source"] = str(CODEX_VSCODE_CONFIG)
+            elif self.pathHasFiles(CODEX_VSCODE_HOME):
+                actual["connectionMode"] = "web"
+                actual["source"] = str(CODEX_VSCODE_HOME)
+
+        elif target == "claudeVscode":
+            claude = self.readClaudeSettings()
+            if claude.get("exists"):
+                actual.update({key: value for key, value in claude.items() if value})
+                actual["connectionMode"] = "bifrost" if claude.get("bifrost") else "web"
+                actual["source"] = str(CLAUDE_SETTINGS)
+            elif self.pathHasFiles(CLAUDE_HOME):
+                actual["connectionMode"] = "web"
+                actual["source"] = str(CLAUDE_HOME)
+
+        if actual.get("connectionMode") not in {"bifrost", "web"}:
+            actual["connectionMode"] = self.defaultMode(target)
+        return {key: str(value).strip() if isinstance(value, str) else value for key, value in actual.items()}
+
+    def readShellWrapper(self, path):
+        result = {"exists": path.exists()}
+        if not path.exists():
+            return result
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return result
+        for key in (
+            "CODEX_HOME",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL",
+            "AITOOLS_BASE_URL",
+            "AITOOLS_AUTH_TOKEN",
+            "AITOOLS_MODEL",
+        ):
+            value = self.shellValue(text, key)
+            if value:
+                result[key] = value
+            if re.search(rf"^\s*unset\s+{re.escape(key)}\b", text, re.MULTILINE):
+                result[f"unset_{key}"] = True
+        return result
+
+    def pathHasFiles(self, path):
+        try:
+            return path.exists() and any(path.iterdir())
+        except Exception:
+            return False
+
+    def shellValue(self, text, key):
+        pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}=(.+?)\s*$", re.MULTILINE)
+        match = pattern.search(text)
+        if not match:
+            return ""
+        raw = match.group(1).strip()
+        try:
+            parts = shlex.split(raw)
+            if parts:
+                return parts[0]
+        except Exception:
+            pass
+        return raw.strip("\"'")
+
+    def readCodexConfig(self, codex_home):
+        config_path = codex_home / "config.toml"
+        result = {"exists": config_path.exists(), "configPath": str(config_path)}
+        if not config_path.exists():
+            return result
+        try:
+            text = config_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return result
+        base_url = self.tomlValue(text, "base_url")
+        token = self.tomlValue(text, "experimental_bearer_token")
+        model = self.tomlValue(text, "model")
+        provider = self.tomlValue(text, "model_provider")
+        result.update(
+            {
+                "bifrostBaseUrl": base_url,
+                "bifrostToken": token,
+                "selectedModel": model,
+                "provider": provider,
+                "managed": AITOOLS_MANAGED_MARKER in text,
+            }
+        )
+        result["bifrost"] = bool(
+            token
+            or "sotatek" in provider.lower()
+            or "bifrost" in base_url.lower()
+            or AITOOLS_MANAGED_MARKER in text
+        )
+        result["accountLabel"] = "Bifrost/Sotatek" if result["bifrost"] else "Codex web login"
+        return result
+
+    def tomlValue(self, text, key):
+        match = re.search(rf"^\s*{re.escape(key)}\s*=\s*\"((?:\\.|[^\"])*)\"", text, re.MULTILINE)
+        if match:
+            return match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+        match = re.search(rf"^\s*{re.escape(key)}\s*=\s*([^\n#]+)", text, re.MULTILINE)
+        if match:
+            return match.group(1).strip().strip("\"'")
+        return ""
+
+    def readClaudeSettings(self):
+        result = {"exists": CLAUDE_SETTINGS.exists(), "configPath": str(CLAUDE_SETTINGS)}
+        if not CLAUDE_SETTINGS.exists():
+            return result
+        try:
+            data = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+        except Exception:
+            return result
+        env = data.get("env", {}) if isinstance(data, dict) else {}
+        if not isinstance(env, dict):
+            env = {}
+        base_url = str(env.get("ANTHROPIC_BASE_URL", "")).strip()
+        token = str(env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or "").strip()
+        model = str(env.get("ANTHROPIC_MODEL", "")).strip()
+        managed = bool(data.get("linuxToolboxAiTools", {}).get("managedEnv")) if isinstance(data.get("linuxToolboxAiTools"), dict) else False
+        result.update(
+            {
+                "bifrostBaseUrl": base_url,
+                "bifrostToken": token,
+                "selectedModel": model,
+                "managed": managed,
+                "bifrost": bool(base_url or token or managed),
+                "accountLabel": "Bifrost/Sotatek" if (base_url or token or managed) else "Claude web login",
+            }
+        )
+        return result
+
+    def tool_path(self, tool):
+        path = shutil.which(tool)
+        if path:
+            return Path(path)
+
+        candidates = [
+            BIN_DIR / tool,
+        ]
+        nvm_dir = HOME / ".nvm/versions/node"
+        if nvm_dir.exists():
+            candidates.extend(sorted(nvm_dir.glob(f"*/bin/{tool}"), reverse=True))
+        local_share = HOME / f".local/share/{tool}"
+        if local_share.exists():
+            candidates.extend(sorted(local_share.glob(f"versions/{tool}"), reverse=True))
+            candidates.extend(sorted(local_share.glob("versions/*"), reverse=True))
+
+        for candidate in candidates:
+            try:
+                if candidate.exists() and os.access(candidate, os.X_OK):
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    def npm_path(self):
+        path = shutil.which("npm")
+        if path:
+            return Path(path)
+        nvm_dir = HOME / ".nvm/versions/node"
+        if nvm_dir.exists():
+            for candidate in sorted(nvm_dir.glob("*/bin/npm"), reverse=True):
+                if candidate.exists() and os.access(candidate, os.X_OK):
+                    return candidate
+        return None
+
     def commandEnv(self, config=None, mode="bifrost"):
         if mode.startswith("personal_"):
             return self.personalEnv(config)
@@ -1107,15 +1409,29 @@ class AIToolsService:
     def personalEnv(self, config=None):
         env = dict(os.environ)
         config = config or {}
-        saved_base = str(config.get("bifrostBaseUrl", "")).strip().rstrip("/")
-        saved_token = str(config.get("bifrostToken", "")).strip()
+        saved_bases = {
+            str(config.get("bifrostBaseUrl", "")).strip().rstrip("/"),
+            str(self.targetConfig(config, "codexCli").get("bifrostBaseUrl", "")).strip().rstrip("/"),
+            str(self.targetConfig(config, "claudeCli").get("bifrostBaseUrl", "")).strip().rstrip("/"),
+            str(self.targetConfig(config, "codexVscode").get("bifrostBaseUrl", "")).strip().rstrip("/"),
+            str(self.targetConfig(config, "claudeVscode").get("bifrostBaseUrl", "")).strip().rstrip("/"),
+        }
+        saved_tokens = {
+            str(config.get("bifrostToken", "")).strip(),
+            str(self.targetConfig(config, "codexCli").get("bifrostToken", "")).strip(),
+            str(self.targetConfig(config, "claudeCli").get("bifrostToken", "")).strip(),
+            str(self.targetConfig(config, "codexVscode").get("bifrostToken", "")).strip(),
+            str(self.targetConfig(config, "claudeVscode").get("bifrostToken", "")).strip(),
+        }
+        saved_bases.discard("")
+        saved_tokens.discard("")
         for key in ("AITOOLS_BASE_URL", "AITOOLS_AUTH_TOKEN", "AITOOLS_MODEL"):
             env.pop(key, None)
         current_base = env.get("ANTHROPIC_BASE_URL", "").strip().rstrip("/")
-        if current_base and (current_base == saved_base or "bifrost" in current_base.lower()):
+        if current_base and (current_base in saved_bases or "bifrost" in current_base.lower()):
             env.pop("ANTHROPIC_BASE_URL", None)
         for key in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
-            if saved_token and env.get(key) == saved_token:
+            if env.get(key) in saved_tokens:
                 env.pop(key, None)
         return env
 
@@ -1154,9 +1470,12 @@ class AIToolsService:
         config = load_app_config().get("aiTools", {})
         if not isinstance(config, dict):
             config = {}
-        base_url = str(config.get("bifrostBaseUrl", "")).strip()
-        token = str(config.get("bifrostToken", "")).strip()
-        model = str(config.get("selectedModel", "")).strip()
+        target = self.targetConfig(config, "claudeCli")
+        if target.get("connectionMode") != "bifrost":
+            return aitools_path
+        base_url = str(target.get("bifrostBaseUrl", "")).strip()
+        token = str(target.get("bifrostToken", "")).strip()
+        model = str(target.get("selectedModel", "")).strip()
         if not base_url and not token and not model:
             return aitools_path
 
@@ -1177,47 +1496,251 @@ class AIToolsService:
         return AITOOLS_WRAPPER
 
     def installTerminalCommands(self, config=None):
-        config = config or {}
-        base_url = str(config.get("bifrostBaseUrl", "")).strip()
-        token = str(config.get("bifrostToken", "")).strip()
-        if not base_url:
-            raise RuntimeError("Bifrost URL is required.")
-        if not token:
-            raise RuntimeError("Bifrost key is required.")
+        installed = []
+        errors = []
+        for installer in (self.installCodexCliCommand, self.installClaudeCliCommand):
+            try:
+                installed.append(installer(config))
+            except Exception as error:
+                errors.append(str(error))
+        if errors and not installed:
+            raise RuntimeError("; ".join(errors))
+        if errors:
+            raise RuntimeError(f"Partial install: {', '.join(installed)}. {'; '.join(errors)}")
+        return installed
 
-        claude_path = shutil.which("claude")
-        aitools_path = self.executable_path()
+    def installClaudeCliCommand(self, config=None):
+        config = config or {}
+        target = self.targetConfig(config, "claudeCli")
+        mode = target.get("connectionMode", "bifrost")
+        base_url = str(target.get("bifrostBaseUrl", "")).strip()
+        token = str(target.get("bifrostToken", "")).strip()
+        model = str(target.get("selectedModel", "")).strip()
+        if mode == "bifrost" and not base_url:
+            raise RuntimeError("Claude CLI Bifrost URL is required.")
+        if mode == "bifrost" and not token:
+            raise RuntimeError("Claude CLI Bifrost key is required.")
+
+        claude_path = self.tool_path("claude")
         if not claude_path:
             raise RuntimeError("claude CLI was not found in PATH.")
-        if not aitools_path:
-            raise RuntimeError("aitools was not found in PATH.")
 
         BIN_DIR.mkdir(parents=True, exist_ok=True)
-        env_lines = [
-            f"export ANTHROPIC_BASE_URL={shlex.quote(base_url)}",
-            f"export ANTHROPIC_AUTH_TOKEN={shlex.quote(token)}",
-            f"export ANTHROPIC_API_KEY={shlex.quote(token)}",
-            f"export AITOOLS_BASE_URL={shlex.quote(base_url)}",
-            f"export AITOOLS_AUTH_TOKEN={shlex.quote(token)}",
-        ]
+        if mode == "bifrost":
+            env_lines = [
+                f"export ANTHROPIC_BASE_URL={shlex.quote(base_url)}",
+                f"export ANTHROPIC_AUTH_TOKEN={shlex.quote(token)}",
+                f"export ANTHROPIC_API_KEY={shlex.quote(token)}",
+            ]
+            if model:
+                env_lines.append(f"export ANTHROPIC_MODEL={shlex.quote(model)}")
+        else:
+            env_lines = [
+                "unset ANTHROPIC_BASE_URL",
+                "unset ANTHROPIC_AUTH_TOKEN",
+                "unset ANTHROPIC_API_KEY",
+                "unset ANTHROPIC_MODEL",
+                "unset AITOOLS_BASE_URL",
+                "unset AITOOLS_AUTH_TOKEN",
+                "unset AITOOLS_MODEL",
+            ]
 
         biclaude = [
             "#!/usr/bin/env bash",
             "set -e",
             *env_lines,
-            f"exec {shlex.quote(claude_path)} \"$@\"",
+            f"exec {shlex.quote(str(claude_path))} \"$@\"",
         ]
         BICLAUDE_COMMAND.write_text("\n".join(biclaude) + "\n", encoding="utf-8")
         BICLAUDE_COMMAND.chmod(0o700)
+        return "biclaude"
+
+    def installCodexCliCommand(self, config=None):
+        config = config or {}
+        target = self.targetConfig(config, "codexCli")
+        mode = target.get("connectionMode", "bifrost")
+        base_url = str(target.get("bifrostBaseUrl", "")).strip()
+        token = str(target.get("bifrostToken", "")).strip()
+        if mode == "bifrost" and not base_url:
+            raise RuntimeError("Codex CLI Bifrost URL is required.")
+        if mode == "bifrost" and not token:
+            raise RuntimeError("Codex CLI Bifrost key is required.")
+
+        codex_path = self.tool_path("codex")
+        if not codex_path:
+            raise RuntimeError("codex CLI was not found in PATH.")
+
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        if mode == "bifrost":
+            self.writeCodexBifrostHome(base_url, token, target)
 
         bicodex = [
             "#!/usr/bin/env bash",
             "set -e",
-            *env_lines,
-            f"exec {shlex.quote(str(aitools_path))} \"$@\"",
         ]
+        if mode == "bifrost":
+            bicodex.append(f"export CODEX_HOME={shlex.quote(str(CODEX_BIFROST_HOME))}")
+        else:
+            bicodex.append("unset CODEX_HOME")
+        bicodex.append(f"exec {shlex.quote(str(codex_path))} \"$@\"")
         BICODEX_COMMAND.write_text("\n".join(bicodex) + "\n", encoding="utf-8")
         BICODEX_COMMAND.chmod(0o700)
+        return "bicodex"
+
+    def applyRealtimeConfig(self, config=None):
+        config = config or {}
+        codex = self.targetConfig(config, "codexCli")
+        codex_base = str(codex.get("bifrostBaseUrl", "")).strip()
+        codex_token = str(codex.get("bifrostToken", "")).strip()
+        if codex.get("connectionMode") == "bifrost" and codex_base and codex_token:
+            self.writeCodexBifrostHome(codex_base, codex_token, codex)
+        if BICODEX_COMMAND.exists() and (
+            codex.get("connectionMode") == "web" or (codex_base and codex_token)
+        ):
+            self.installCodexCliCommand(config)
+        if BICLAUDE_COMMAND.exists():
+            claude = self.targetConfig(config, "claudeCli")
+            if claude.get("connectionMode") == "web" or (
+                str(claude.get("bifrostBaseUrl", "")).strip() and str(claude.get("bifrostToken", "")).strip()
+            ):
+                self.installClaudeCliCommand(config)
+        codex_vscode = self.targetConfig(config, "codexVscode")
+        codex_vscode_base = str(codex_vscode.get("bifrostBaseUrl", "")).strip()
+        codex_vscode_token = str(codex_vscode.get("bifrostToken", "")).strip()
+        if codex_vscode.get("connectionMode") == "bifrost" and codex_vscode_base and codex_vscode_token:
+            self.writeCodexBifrostHome(codex_vscode_base, codex_vscode_token, codex_vscode, CODEX_VSCODE_HOME)
+        elif codex_vscode.get("connectionMode") == "web":
+            self.clearManagedCodexConfig(CODEX_VSCODE_CONFIG)
+
+        claude_vscode = self.targetConfig(config, "claudeVscode")
+        if claude_vscode.get("connectionMode") == "bifrost":
+            self.writeClaudeSettingsEnv(claude_vscode)
+        else:
+            self.clearManagedClaudeEnv(claude_vscode)
+
+    def writeCodexBifrostHome(self, base_url, token, config=None, codex_home=None):
+        """Write a dedicated CODEX_HOME for Bifrost so the personal ~/.codex
+        used by VS Code keeps its web login untouched."""
+        config = config or {}
+        codex_home = codex_home or CODEX_BIFROST_HOME
+        model = str(config.get("selectedModel", "")).strip()
+        # Codex's OpenAI-compatible endpoint lives under /openai/v1; the stored
+        # Bifrost base URL points at the Anthropic path, so swap the suffix.
+        trimmed = base_url.rstrip("/")
+        for suffix in ("/anthropic", "/openai/v1", "/openai", "/v1"):
+            if trimmed.endswith(suffix):
+                trimmed = trimmed[: -len(suffix)]
+                break
+        codex_base = f"{trimmed}/openai/v1"
+        codex_model = model if model.startswith("fridaycodex/") else "fridaycodex/gpt-5.5"
+
+        codex_home.mkdir(parents=True, exist_ok=True)
+        lines = [
+            f"# {AITOOLS_MANAGED_MARKER}",
+            "approvals_reviewer = \"user\"",
+            "service_tier = \"default\"",
+            f"model = {self._toml_str(codex_model)}",
+            "model_provider = \"sotatek\"",
+            "model_reasoning_effort = \"high\"",
+            "",
+            "[model_providers.sotatek]",
+            "name = \"Sotatek Proxy\"",
+            f"base_url = {self._toml_str(codex_base)}",
+            f"experimental_bearer_token = {self._toml_str(token)}",
+            "wire_api = \"responses\"",
+            "",
+            f"[projects.{self._toml_str(str(HOME))}]",
+            "trust_level = \"trusted\"",
+            "",
+            "[notice]",
+            "hide_rate_limit_model_nudge = true",
+        ]
+        config_path = codex_home / "config.toml"
+        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        config_path.chmod(0o600)
+
+    def clearManagedCodexConfig(self, config_path):
+        try:
+            text = config_path.read_text(encoding="utf-8")
+        except Exception:
+            return
+        if AITOOLS_MANAGED_MARKER in text:
+            config_path.unlink(missing_ok=True)
+
+    def writeClaudeSettingsEnv(self, target):
+        base_url = str(target.get("bifrostBaseUrl", "")).strip()
+        token = str(target.get("bifrostToken", "")).strip()
+        model = str(target.get("selectedModel", "")).strip()
+        if not base_url or not token:
+            return
+        try:
+            data = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        env = data.get("env")
+        if not isinstance(env, dict):
+            env = {}
+        env["ANTHROPIC_BASE_URL"] = base_url
+        env["ANTHROPIC_AUTH_TOKEN"] = token
+        env["ANTHROPIC_API_KEY"] = token
+        if model:
+            env["ANTHROPIC_MODEL"] = model
+        data["env"] = env
+        data["linuxToolboxAiTools"] = {"managedEnv": True}
+        CLAUDE_HOME.mkdir(parents=True, exist_ok=True)
+        CLAUDE_SETTINGS.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        CLAUDE_SETTINGS.chmod(0o600)
+
+    def clearManagedClaudeEnv(self, target=None):
+        try:
+            data = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        env = data.get("env")
+        if not isinstance(env, dict):
+            return
+        target = target or {}
+        saved_values = {
+            str(target.get("bifrostBaseUrl", "")).strip(),
+            str(target.get("bifrostToken", "")).strip(),
+            str(target.get("selectedModel", "")).strip(),
+        }
+        managed = data.get("linuxToolboxAiTools", {}).get("managedEnv") if isinstance(data.get("linuxToolboxAiTools"), dict) else False
+        for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"):
+            value = str(env.get(key, "")).strip()
+            if managed or value in saved_values or (key == "ANTHROPIC_BASE_URL" and "bifrost" in value.lower()):
+                env.pop(key, None)
+        if env:
+            data["env"] = env
+        else:
+            data.pop("env", None)
+        if managed:
+            data.pop("linuxToolboxAiTools", None)
+        CLAUDE_SETTINGS.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        CLAUDE_SETTINGS.chmod(0o600)
+
+    def restoreOriginal(self, config=None):
+        config = config or {}
+        BICODEX_COMMAND.unlink(missing_ok=True)
+        BICLAUDE_COMMAND.unlink(missing_ok=True)
+        try:
+            self.removeDesktopLauncher()
+        except Exception:
+            AITOOLS_DESKTOP.unlink(missing_ok=True)
+            AITOOLS_WRAPPER.unlink(missing_ok=True)
+        self.clearManagedCodexConfig(CODEX_BIFROST_HOME / "config.toml")
+        self.clearManagedCodexConfig(CODEX_VSCODE_CONFIG)
+        for target in ("claudeCli", "claudeVscode"):
+            self.clearManagedClaudeEnv(self.targetConfig(config, target))
+
+    @staticmethod
+    def _toml_str(value):
+        escaped = str(value).replace("\\", "\\\\").replace("\"", "\\\"")
+        return f"\"{escaped}\""
 
     def terminalCommandsInstalled(self):
         return BICLAUDE_COMMAND.exists() and BICODEX_COMMAND.exists()
@@ -1262,6 +1785,26 @@ class AIToolsService:
             if shutil.which(binary):
                 return command
         raise RuntimeError("No terminal emulator was found.")
+
+    def setupCodexCli(self):
+        npm = self.npm_path()
+        if not npm:
+            raise RuntimeError("npm was not found. Install Node.js/npm or nvm first.")
+        command = (
+            "set -e; "
+            'export NVM_DIR="$HOME/.nvm"; '
+            '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
+            "npm install -g @openai/codex; "
+            "codex --version; "
+            'printf "\\nCodex CLI setup finished. Press Enter to close..."; '
+            "read _"
+        )
+        subprocess.Popen(
+            self.terminalCommand(["bash", "-lc", command], raw=True),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
     def launchInteractive(self, model=None, chat=False, config=None):
         extra_args = []
@@ -1319,15 +1862,15 @@ class AIToolsService:
         return self.parseModels(completed.stdout)
 
     def launchPersonal(self, tool, model=None):
-        binary = shutil.which(tool)
+        binary = self.tool_path(tool)
         if not binary:
             raise RuntimeError(f"{tool} CLI was not found in PATH.")
         if tool == "claude":
-            args = [binary]
+            args = [str(binary)]
             if model:
                 args.extend(["--model", model])
         elif tool == "codex":
-            args = [binary]
+            args = [str(binary)]
             if model:
                 args.extend(["--model", model])
         else:
@@ -1342,11 +1885,11 @@ class AIToolsService:
 
     def launchLogin(self, tool):
         if tool == "codex":
-            binary = shutil.which("codex")
-            args = [binary, "login"] if binary else []
+            binary = self.tool_path("codex")
+            args = [str(binary), "login"] if binary else []
         elif tool == "claude":
-            binary = shutil.which("claude")
-            args = [binary, "auth", "login"] if binary else []
+            binary = self.tool_path("claude")
+            args = [str(binary), "auth", "login"] if binary else []
         else:
             raise RuntimeError(f"Unsupported login tool: {tool}")
         if not args:
@@ -1360,18 +1903,18 @@ class AIToolsService:
         )
 
     def runPersonalPrompt(self, tool, prompt, model=None, system_prompt=None):
-        binary = shutil.which(tool)
+        binary = self.tool_path(tool)
         if not binary:
             raise RuntimeError(f"{tool} CLI was not found in PATH.")
         if tool == "claude":
-            command = [binary, "-p"]
+            command = [str(binary), "-p"]
             if model:
                 command.extend(["--model", model])
             if system_prompt:
                 command.extend(["--system-prompt", system_prompt])
             command.append(prompt)
         elif tool == "codex":
-            command = [binary, "exec"]
+            command = [str(binary), "exec"]
             if model:
                 command.extend(["--model", model])
             if system_prompt:
@@ -1409,7 +1952,7 @@ class AIToolsService:
         return models
 
     def loadClaudeEnv(self):
-        path = HOME / ".claude/settings.json"
+        path = CLAUDE_SETTINGS
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -1421,9 +1964,44 @@ class AIToolsService:
 
     def configStatus(self, config=None):
         config = config or {}
-        env = self.commandEnv(config, "bifrost")
-        saved_base = bool(str(config.get("bifrostBaseUrl", "")).strip())
-        saved_token = bool(str(config.get("bifrostToken", "")).strip())
+        targets = {target: self.actualTargetConfig(config, target) for target, _label, _tool, _path in AITOOLS_TARGETS}
+        codex_cli = targets["codexCli"]
+        claude_cli = targets["claudeCli"]
+        env = self.commandEnv(claude_cli, "bifrost")
+        saved_base = any(str(item.get("bifrostBaseUrl", "")).strip() for item in targets.values())
+        saved_token = any(str(item.get("bifrostToken", "")).strip() for item in targets.values())
+        target_status = {}
+        for target, _label, tool, path in AITOOLS_TARGETS:
+            target_config = targets[target]
+            mode = target_config.get("connectionMode", self.defaultMode(target))
+            bifrost_ready = bool(target_config.get("bifrostBaseUrl") and target_config.get("bifrostToken"))
+            binary_ready = self.tool_path(tool) is not None
+            if target == "codexCli":
+                runtime_ready = BICODEX_COMMAND.exists()
+                config_ready = bool(target_config.get("configPath") and Path(str(target_config.get("configPath"))).exists())
+                if mode == "web":
+                    config_ready = self.pathHasFiles(CODEX_VSCODE_HOME)
+            elif target == "claudeCli":
+                runtime_ready = BICLAUDE_COMMAND.exists()
+                config_ready = bifrost_ready if mode == "bifrost" else self.pathHasFiles(CLAUDE_HOME)
+            elif target == "codexVscode":
+                runtime_ready = CODEX_VSCODE_CONFIG.exists() if mode == "bifrost" else self.pathHasFiles(CODEX_VSCODE_HOME)
+                config_ready = runtime_ready
+            else:
+                runtime_ready = CLAUDE_SETTINGS.exists() if mode == "bifrost" else self.pathHasFiles(CLAUDE_HOME)
+                config_ready = runtime_ready
+            target_status[target] = {
+                "mode": mode,
+                "bifrost": bifrost_ready,
+                "binary": binary_ready,
+                "runtime": runtime_ready,
+                "config": config_ready,
+                "accountLabel": target_config.get("accountLabel", ""),
+                "source": target_config.get("source", ""),
+                "model": target_config.get("selectedModel", ""),
+                "baseUrl": target_config.get("bifrostBaseUrl", ""),
+                "path": str(path),
+            }
         return {
             "mode": config.get("connectionMode", "bifrost"),
             "baseUrl": bool(env.get("ANTHROPIC_BASE_URL") or env.get("AITOOLS_BASE_URL")),
@@ -1435,8 +2013,26 @@ class AIToolsService:
             "savedBaseUrl": saved_base,
             "savedToken": saved_token,
             "defaultModel": env.get("ANTHROPIC_MODEL") or env.get("AITOOLS_MODEL") or "",
-            "personalClaude": shutil.which("claude") is not None,
-            "personalCodex": shutil.which("codex") is not None,
+            "personalClaude": self.tool_path("claude") is not None,
+            "personalCodex": self.tool_path("codex") is not None,
+            "targets": target_status,
+            "codexCli": target_status["codexCli"]["runtime"]
+            and (
+                (target_status["codexCli"]["mode"] == "web" and target_status["codexCli"]["config"])
+                or (target_status["codexCli"]["mode"] == "bifrost" and target_status["codexCli"]["bifrost"])
+            ),
+            "claudeCli": target_status["claudeCli"]["runtime"]
+            and (
+                (target_status["claudeCli"]["mode"] == "web" and target_status["claudeCli"]["config"])
+                or (target_status["claudeCli"]["mode"] == "bifrost" and target_status["claudeCli"]["bifrost"])
+            ),
+            "codexCliCommand": BICODEX_COMMAND.exists(),
+            "claudeCliCommand": BICLAUDE_COMMAND.exists(),
+            "codexCliHome": (CODEX_BIFROST_HOME / "config.toml").exists(),
+            "codexVscodeConfig": CODEX_VSCODE_CONFIG.exists(),
+            "claudeVscodeConfig": CLAUDE_SETTINGS.exists(),
+            "codexVscodeAccount": targets["codexVscode"].get("accountLabel", ""),
+            "claudeVscodeAccount": targets["claudeVscode"].get("accountLabel", ""),
         }
 
 
@@ -1445,13 +2041,14 @@ class App(Gtk.ApplicationWindow):
         super().__init__(application=application)
         self.load_css()
         self.set_title("Linux Toolbox")
-        self.set_default_size(1040, 720)
+        self.set_default_size(1120, 720)
         self.set_border_width(0)
         self.profiles = []
         self.syncing_style = False
         self.syncing_features = False
         self.syncing_dock_layout = False
         self.syncing_sidebar = False
+        self.syncing_aitools_fields = False
         self.aitools_service = AIToolsService()
         self.mouse_service = MouseMovementService()
         self.vietnamese_service = VietnameseInputService(lambda message: self.log(message))
@@ -1470,10 +2067,12 @@ class App(Gtk.ApplicationWindow):
         header.set_show_close_button(True)
         header.props.title = "Linux Toolbox"
         header.props.subtitle = "Set-and-forget tools for Ubuntu"
+        header.get_style_context().add_class("app-header")
         self.set_titlebar(header)
 
         refresh_header_button = Gtk.Button(label="Refresh")
         refresh_header_button.set_tooltip_text("Scan Chrome profiles again")
+        refresh_header_button.get_style_context().add_class("header-button")
         refresh_header_button.connect("clicked", self.on_refresh)
         header.pack_end(refresh_header_button)
 
@@ -1483,7 +2082,7 @@ class App(Gtk.ApplicationWindow):
         self.stack.connect("notify::visible-child-name", self.on_stack_visible_child_changed)
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        sidebar.set_size_request(220, -1)
+        sidebar.set_size_request(232, -1)
         sidebar.get_style_context().add_class("sidebar")
         root.pack_start(sidebar, False, False, 0)
 
@@ -1525,6 +2124,7 @@ class App(Gtk.ApplicationWindow):
         intro.set_markup("<span size='large'><b>Overview</b></span>")
         intro.set_xalign(0)
         intro.set_line_wrap(True)
+        intro.get_style_context().add_class("page-title")
         main_tab.pack_start(intro, False, False, 0)
 
         description = Gtk.Label(
@@ -1532,6 +2132,7 @@ class App(Gtk.ApplicationWindow):
         )
         description.set_xalign(0)
         description.set_line_wrap(True)
+        description.get_style_context().add_class("page-description")
         main_tab.pack_start(description, False, False, 0)
 
         summary_card = self.create_card("At a Glance", "Current setup status for the main tools.")
@@ -1542,6 +2143,31 @@ class App(Gtk.ApplicationWindow):
         self.overview_summary_box.set_column_spacing(8)
         self.overview_summary_box.set_row_spacing(8)
         summary_card.pack_start(self.overview_summary_box, False, False, 0)
+
+        self.overview_restore_card = self.create_card("Restore Original", "Undo Linux Toolbox changes from one place.")
+        self.overview_restore_card.set_no_show_all(True)
+        self.overview_restore_card.hide()
+        main_tab.pack_start(self.overview_restore_card, False, False, 0)
+        self.overview_restore_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        self.overview_restore_card.pack_start(self.overview_restore_grid, False, False, 0)
+        self.overview_restore_buttons = {}
+        for index, (key, title, tooltip, handler) in enumerate(
+            (
+                ("aitools", "AI Tools", "Remove managed AI wrappers/config only.", self.on_aitools_restore_original),
+                ("chrome", "Chrome", "Remove profile launchers and hover previews.", self.on_chrome_restore_original),
+                ("mouse", "Mouse", "Restore original maccel mouse settings.", self.on_mouse_restore),
+                ("clipboard", "Clipboard", "Restore original clipboard startup and shortcuts.", self.on_clipboard_restore_original),
+                ("vietnamese", "Vietnamese Input", "Restore original input method settings.", self.on_vietnamese_restore),
+                ("dock_layout", "Dock Layout", "Restore original dock layout.", self.on_dock_restore_layout),
+                ("dock_style", "Dock Click", "Restore original dock click behavior.", self.on_dock_restore_style),
+            )
+        ):
+            button = Gtk.Button(label=title)
+            button.set_tooltip_text(tooltip)
+            button.set_no_show_all(True)
+            button.connect("clicked", handler)
+            self.overview_restore_grid.attach(button, index % 3, index // 3, 1, 1)
+            self.overview_restore_buttons[key] = button
 
         self.compatibility_card = self.create_card("System Check", "Linux, GNOME, Chrome, and helper availability.")
         main_tab.pack_start(self.compatibility_card, False, False, 0)
@@ -1563,7 +2189,9 @@ class App(Gtk.ApplicationWindow):
         self.log_view.set_cursor_visible(False)
         self.log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         log_scroller = Gtk.ScrolledWindow()
-        log_scroller.set_min_content_height(180)
+        log_scroller.set_min_content_height(80)
+        log_scroller.set_no_show_all(True)
+        log_scroller.hide()
         log_scroller.add(self.log_view)
         status_card.pack_start(log_scroller, True, True, 8)
 
@@ -1571,75 +2199,95 @@ class App(Gtk.ApplicationWindow):
         aitools_intro.set_markup("<span size='large'><b>AI Tools</b></span>")
         aitools_intro.set_xalign(0)
         aitools_intro.set_line_wrap(True)
+        aitools_intro.get_style_context().add_class("page-title")
         aitools_tab.pack_start(aitools_intro, False, False, 0)
 
         aitools_description = Gtk.Label(
-            label="Save one Bifrost key, log in to personal OpenAI/Claude, then use codex, claude, bicodex, or biclaude from any terminal."
+            label="Manage separate configs for Codex CLI, Claude CLI, Codex VS Code, and Claude VS Code without mixing Bifrost keys with web-login accounts."
         )
         aitools_description.set_xalign(0)
         aitools_description.set_line_wrap(True)
+        aitools_description.get_style_context().add_class("page-description")
         aitools_tab.pack_start(aitools_description, False, False, 0)
 
-        aitools_account_card = self.create_card("Setup", "Configure the four terminal commands.")
-        aitools_tab.pack_start(aitools_account_card, False, False, 0)
-
-        aitools_account_grid = Gtk.Grid(column_spacing=10, row_spacing=8)
-        aitools_account_card.pack_start(aitools_account_grid, False, False, 0)
-
-        base_url_label = Gtk.Label(label="Bifrost URL")
-        base_url_label.set_xalign(0)
-        aitools_account_grid.attach(base_url_label, 0, 0, 1, 1)
-        self.aitools_bifrost_base_entry = Gtk.Entry()
-        self.aitools_bifrost_base_entry.set_placeholder_text("https://bifrost.example.com/anthropic")
-        self.aitools_bifrost_base_entry.set_hexpand(True)
-        aitools_account_grid.attach(self.aitools_bifrost_base_entry, 1, 0, 3, 1)
-
-        token_label = Gtk.Label(label="Bifrost key")
-        token_label.set_xalign(0)
-        aitools_account_grid.attach(token_label, 0, 1, 1, 1)
-        self.aitools_bifrost_token_entry = Gtk.Entry()
-        self.aitools_bifrost_token_entry.set_visibility(False)
-        self.aitools_bifrost_token_entry.set_placeholder_text("sk-bf-...")
-        self.aitools_bifrost_token_entry.set_hexpand(True)
-        aitools_account_grid.attach(self.aitools_bifrost_token_entry, 1, 1, 3, 1)
-
-        aitools_account_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        aitools_account_card.pack_start(aitools_account_actions, False, False, 0)
-
-        self.aitools_install_commands_button = self.create_primary_button(
-            "Save Bifrost + Install Commands",
-            "Create or update biclaude and bicodex in ~/.local/bin.",
+        aitools_dependency_card = self.create_card("Status Check", "Required commands and generated wrappers.")
+        aitools_tab.pack_start(aitools_dependency_card, False, False, 0)
+        self.aitools_dependency_pills = self.create_status_table(
+            aitools_dependency_card,
+            (
+                ("codex", "Codex CLI"),
+                ("claude", "Claude CLI"),
+                ("bicodex", "bicodex wrapper"),
+                ("biclaude", "biclaude wrapper"),
+                ("bifrost", "Bifrost config"),
+            ),
         )
-        self.aitools_install_commands_button.connect("clicked", self.on_aitools_install_commands)
-        aitools_account_actions.pack_start(self.aitools_install_commands_button, True, True, 0)
 
-        self.aitools_clear_bifrost_button = Gtk.Button(label="Clear Bifrost Key")
-        self.aitools_clear_bifrost_button.set_tooltip_text("Remove the saved Bifrost key from Linux Toolbox config.")
-        self.aitools_clear_bifrost_button.connect("clicked", self.on_aitools_clear_bifrost)
-        aitools_account_actions.pack_start(self.aitools_clear_bifrost_button, True, True, 0)
+        aitools_guide_card = self.create_card("Config Split", "Use the overview table first; open details only when you need to edit.")
+        aitools_tab.pack_start(aitools_guide_card, False, False, 0)
+        aitools_guide_card.set_no_show_all(True)
+        aitools_guide_card.hide()
 
-        aitools_login_card = self.create_card("Personal Login", "Use your own OpenAI/Codex or Claude account.")
-        aitools_tab.pack_start(aitools_login_card, False, False, 0)
-
-        aitools_login_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        aitools_login_card.pack_start(aitools_login_actions, False, False, 0)
-
-        self.aitools_openai_login_button = self.create_primary_button(
-            "OpenAI Login",
-            "Run codex login in a terminal.",
+        self.aitools_guide_label = Gtk.Label(
+            label=(
+                "Each row shows whether that target is configured and which mode it uses.\n"
+                "Click Edit to switch Bifrost/Web login or change keys and account labels.\n"
+                "Use Bifrost Token Usage to check API-key token usage in the portal."
+            )
         )
-        self.aitools_openai_login_button.connect("clicked", self.on_aitools_openai_login)
-        aitools_login_actions.pack_start(self.aitools_openai_login_button, True, True, 0)
+        self.aitools_guide_label.set_xalign(0)
+        self.aitools_guide_label.set_line_wrap(True)
+        aitools_guide_card.pack_start(self.aitools_guide_label, False, False, 0)
 
-        self.aitools_claude_login_button = self.create_primary_button(
-            "Claude Web Login",
-            "Run claude auth login in a terminal.",
+        aitools_summary_card = self.create_card("Configuration", "Edit only the target that needs setup.")
+        aitools_tab.pack_start(aitools_summary_card, False, False, 0)
+        self.create_aitools_summary_table(aitools_summary_card)
+
+        aitools_actions_card = self.create_card("Next Step", "Only actions needed for the current state are shown.")
+        aitools_tab.pack_start(aitools_actions_card, False, False, 0)
+        self.aitools_actions_card = aitools_actions_card
+        aitools_actions_card.set_no_show_all(True)
+        aitools_actions_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        aitools_actions_card.pack_start(aitools_actions_grid, False, False, 0)
+
+        self.aitools_install_codex_command_button = self.create_primary_button(
+            "Install bicodex",
+            "Create or refresh ~/.local/bin/bicodex using the current Codex CLI mode.",
         )
-        self.aitools_claude_login_button.connect("clicked", self.on_aitools_claude_login)
-        aitools_login_actions.pack_start(self.aitools_claude_login_button, True, True, 0)
+        self.aitools_install_codex_command_button.connect("clicked", self.on_aitools_install_codex_command)
+        aitools_actions_grid.attach(self.aitools_install_codex_command_button, 0, 0, 1, 1)
 
-        aitools_status_card = self.create_card("Terminal Commands", "Available after setup.")
+        self.aitools_install_claude_command_button = self.create_primary_button(
+            "Install biclaude",
+            "Create or refresh ~/.local/bin/biclaude using the current Claude CLI mode.",
+        )
+        self.aitools_install_claude_command_button.connect("clicked", self.on_aitools_install_claude_command)
+        aitools_actions_grid.attach(self.aitools_install_claude_command_button, 1, 0, 1, 1)
+
+        self.aitools_install_codex_button = self.create_primary_button(
+            "Install Codex CLI",
+            "Run npm install -g @openai/codex in a terminal.",
+        )
+        self.aitools_install_codex_button.connect("clicked", self.on_aitools_install_codex)
+        aitools_actions_grid.attach(self.aitools_install_codex_button, 0, 1, 1, 1)
+
+        self.aitools_bifrost_portal_button = self.create_primary_button(
+            "Bifrost Token Usage",
+            f"Open {BIFROST_PORTAL_URL} to check token usage for your Bifrost API key.",
+        )
+        self.aitools_bifrost_portal_button.connect("clicked", self.on_aitools_open_bifrost_portal)
+        aitools_actions_grid.attach(self.aitools_bifrost_portal_button, 1, 1, 1, 1)
+
+        self.aitools_restore_button = Gtk.Button(label="Restore Original")
+        self.aitools_restore_button.set_no_show_all(True)
+        self.aitools_restore_button.set_tooltip_text("Remove Linux Toolbox AI wrappers and managed Bifrost config without deleting personal web logins.")
+        self.aitools_restore_button.connect("clicked", self.on_aitools_restore_original)
+        aitools_actions_grid.attach(self.aitools_restore_button, 0, 2, 2, 1)
+
+        aitools_status_card = self.create_card("Current Status", "Live status for the split CLI and VS Code configs.")
         aitools_tab.pack_start(aitools_status_card, False, False, 0)
+        aitools_status_card.set_no_show_all(True)
+        aitools_status_card.hide()
 
         self.aitools_status_pill = self.make_pill("Unknown", "warn")
         aitools_status_card.pack_start(self.aitools_status_pill, False, False, 0)
@@ -1653,6 +2301,7 @@ class App(Gtk.ApplicationWindow):
         chrome_intro.set_markup("<span size='large'><b>Chrome Profiles</b></span>")
         chrome_intro.set_xalign(0)
         chrome_intro.set_line_wrap(True)
+        chrome_intro.get_style_context().add_class("page-title")
         chrome_tab.pack_start(chrome_intro, False, False, 0)
 
         chrome_description = Gtk.Label(
@@ -1660,9 +2309,22 @@ class App(Gtk.ApplicationWindow):
         )
         chrome_description.set_xalign(0)
         chrome_description.set_line_wrap(True)
+        chrome_description.get_style_context().add_class("page-description")
         chrome_tab.pack_start(chrome_description, False, False, 0)
 
-        feature_card = self.create_card("Chrome Features", "One-time setup for separate profile icons and previews.")
+        chrome_status_card = self.create_card("Status Check", "Browser profile dependencies and current dock state.")
+        chrome_tab.pack_start(chrome_status_card, False, False, 0)
+        self.chrome_status_pills = self.create_status_table(
+            chrome_status_card,
+            (
+                ("browser", "Chrome/Chromium"),
+                ("profiles", "Profiles found"),
+                ("icons", "Profile dock icons"),
+                ("hover", "Hover previews"),
+            ),
+        )
+
+        feature_card = self.create_card("Setup Flow", "Turn on the behavior you want. Turning it off restores the default path.")
         chrome_tab.pack_start(feature_card, False, False, 0)
 
         self.profile_switch = self.create_feature_switch(
@@ -1677,9 +2339,17 @@ class App(Gtk.ApplicationWindow):
             "Install and enable the local GNOME dock hover-preview extension.",
             self.on_hover_feature_toggled,
         )
+        self.chrome_restore_button = Gtk.Button(label="Restore Original")
+        self.chrome_restore_button.set_no_show_all(True)
+        self.chrome_restore_button.set_tooltip_text("Remove Linux Toolbox Chrome profile launchers and disable hover previews.")
+        self.chrome_restore_button.connect("clicked", self.on_chrome_restore_original)
+        feature_card.pack_start(self.chrome_restore_button, False, False, 0)
 
         setup_card = self.create_card("Manual Actions", "Regenerate or pin profile launchers when Chrome profiles change.")
         chrome_tab.pack_start(setup_card, False, False, 0)
+        self.chrome_manual_actions_card = setup_card
+        setup_card.set_no_show_all(True)
+        setup_card.hide()
 
         setup_grid = Gtk.Grid(column_spacing=12, row_spacing=12)
         setup_card.pack_start(setup_grid, False, False, 0)
@@ -1696,15 +2366,47 @@ class App(Gtk.ApplicationWindow):
         hover_button.connect("clicked", self.on_install_hover)
         setup_grid.attach(hover_button, 2, 0, 1, 1)
 
+        chrome_restore_button = Gtk.Button(label="Restore Original")
+        chrome_restore_button.set_tooltip_text("Remove Linux Toolbox Chrome profile launchers and disable hover previews.")
+        chrome_restore_button.connect("clicked", self.on_chrome_restore_original)
+        setup_grid.attach(chrome_restore_button, 0, 1, 3, 1)
+
         profile_card = self.create_card("Detected Profiles", "Chrome profiles found on this machine.")
         chrome_tab.pack_start(profile_card, True, True, 0)
+        profile_card.set_no_show_all(True)
+        profile_card.hide()
 
         self.profile_list = Gtk.ListBox()
         self.profile_list.set_selection_mode(Gtk.SelectionMode.NONE)
         profile_card.pack_start(self.profile_list, True, True, 0)
 
+        mouse_intro = Gtk.Label()
+        mouse_intro.set_markup("<span size='large'><b>Mouse</b></span>")
+        mouse_intro.set_xalign(0)
+        mouse_intro.set_line_wrap(True)
+        mouse_intro.get_style_context().add_class("page-title")
+        mouse_tab.pack_start(mouse_intro, False, False, 0)
+
+        mouse_description = Gtk.Label(
+            label="Tune pointer movement and acceleration presets for daily desktop use."
+        )
+        mouse_description.set_xalign(0)
+        mouse_description.set_line_wrap(True)
+        mouse_description.get_style_context().add_class("page-description")
+        mouse_tab.pack_start(mouse_description, False, False, 0)
+
         mouse_card = self.create_card("Mouse Movement", "Make Linux mouse movement feel closer to Windows or macOS.")
         mouse_tab.pack_start(mouse_card, False, False, 0)
+
+        self.mouse_status_pills = self.create_status_table(
+            mouse_card,
+            (
+                ("platform", "Linux desktop"),
+                ("pkexec", "Authentication helper"),
+                ("maccel", "maccel backend"),
+                ("permission", "Driver write permission"),
+            ),
+        )
 
         install_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         mouse_card.pack_start(install_row, False, False, 0)
@@ -1715,6 +2417,7 @@ class App(Gtk.ApplicationWindow):
         install_row.pack_start(self.mouse_backend_indicator, True, True, 0)
 
         self.mouse_install_button = Gtk.Button(label="Install maccel")
+        self.mouse_install_button.set_no_show_all(True)
         self.mouse_install_button.set_tooltip_text("Install maccel and required Ubuntu packages with authentication.")
         self.mouse_install_button.connect("clicked", self.on_mouse_install_backend)
         install_row.pack_end(self.mouse_install_button, False, False, 0)
@@ -1731,6 +2434,9 @@ class App(Gtk.ApplicationWindow):
         log_label = Gtk.Label()
         log_label.set_markup("<b>Install / Permission Log</b>")
         log_label.set_xalign(0)
+        log_label.set_no_show_all(True)
+        log_label.hide()
+        self.mouse_log_label = log_label
         mouse_card.pack_start(log_label, False, False, 0)
 
         self.mouse_install_log_view = Gtk.TextView()
@@ -1739,11 +2445,15 @@ class App(Gtk.ApplicationWindow):
         self.mouse_install_log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.mouse_install_log_view.set_monospace(True)
         mouse_log_scroller = Gtk.ScrolledWindow()
-        mouse_log_scroller.set_min_content_height(180)
+        mouse_log_scroller.set_min_content_height(72)
+        mouse_log_scroller.set_no_show_all(True)
+        mouse_log_scroller.hide()
         mouse_log_scroller.add(self.mouse_install_log_view)
+        self.mouse_log_scroller = mouse_log_scroller
         mouse_card.pack_start(mouse_log_scroller, True, True, 0)
 
         mouse_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        self.mouse_preset_grid = mouse_grid
         mouse_card.pack_start(mouse_grid, False, False, 0)
 
         self.mouse_windows_button = self.create_primary_button("Windows", "Apply the Windows-like mouse movement preset.")
@@ -1754,14 +2464,16 @@ class App(Gtk.ApplicationWindow):
         self.mouse_macos_button.connect("clicked", self.on_mouse_macos)
         mouse_grid.attach(self.mouse_macos_button, 1, 0, 1, 1)
 
-        self.mouse_restore_button = Gtk.Button(label="Restore Previous")
-        self.mouse_restore_button.set_tooltip_text("Restore the mouse settings backed up before the last preset was applied.")
+        self.mouse_restore_button = Gtk.Button(label="Restore Original")
+        self.mouse_restore_button.set_no_show_all(True)
+        self.mouse_restore_button.set_tooltip_text("Restore the mouse settings saved before Linux Toolbox changed them.")
         self.mouse_restore_button.connect("clicked", self.on_mouse_restore)
         mouse_grid.attach(self.mouse_restore_button, 2, 0, 1, 1)
 
         custom_label = Gtk.Label()
         custom_label.set_markup("<b>Custom maccel SensMouse</b>")
         custom_label.set_xalign(0)
+        self.mouse_custom_label = custom_label
         mouse_card.pack_start(custom_label, False, False, 0)
 
         custom_hint = Gtk.Label(
@@ -1769,9 +2481,12 @@ class App(Gtk.ApplicationWindow):
         )
         custom_hint.set_xalign(0)
         custom_hint.set_line_wrap(True)
+        custom_hint.set_no_show_all(True)
+        custom_hint.hide()
         mouse_card.pack_start(custom_hint, False, False, 0)
 
         custom_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.mouse_custom_row = custom_row
         mouse_card.pack_start(custom_row, False, False, 0)
 
         sens_caption = Gtk.Label(label="Sensitivity multiplier")
@@ -1808,6 +2523,33 @@ class App(Gtk.ApplicationWindow):
         self.mouse_warning_label.set_line_wrap(True)
         mouse_card.pack_start(self.mouse_warning_label, False, False, 0)
 
+        dock_intro = Gtk.Label()
+        dock_intro.set_markup("<span size='large'><b>Dock Style</b></span>")
+        dock_intro.set_xalign(0)
+        dock_intro.set_line_wrap(True)
+        dock_intro.get_style_context().add_class("page-title")
+        dock_tab.pack_start(dock_intro, False, False, 0)
+
+        dock_description = Gtk.Label(
+            label="Set the Ubuntu Dock layout and click behavior to match your workflow."
+        )
+        dock_description.set_xalign(0)
+        dock_description.set_line_wrap(True)
+        dock_description.get_style_context().add_class("page-description")
+        dock_tab.pack_start(dock_description, False, False, 0)
+
+        dock_status_card = self.create_card("Status Check", "Dash-to-Dock dependency and current behavior.")
+        dock_tab.pack_start(dock_status_card, False, False, 0)
+        self.dock_status_pills = self.create_status_table(
+            dock_status_card,
+            (
+                ("schema", "Dash-to-Dock schema"),
+                ("layout", "Dock layout"),
+                ("click", "Click style"),
+                ("restore", "Restore point"),
+            ),
+        )
+
         layout_card = self.create_card("Dock Layout", "Set the Ubuntu Dock once to a Windows-style horizontal taskbar.")
         dock_tab.pack_start(layout_card, False, False, 0)
 
@@ -1827,9 +2569,12 @@ class App(Gtk.ApplicationWindow):
         )
         self.dock_windows_button.connect("clicked", self.on_dock_windows_taskbar)
         layout_grid.attach(self.dock_windows_button, 0, 0, 1, 1)
+        self.dock_windows_button.set_no_show_all(True)
+        self.dock_windows_button.hide()
 
-        self.dock_restore_button = Gtk.Button(label="Restore Previous")
-        self.dock_restore_button.set_tooltip_text("Restore the dock layout saved before the last Windows taskbar apply.")
+        self.dock_restore_button = Gtk.Button(label="Restore Original")
+        self.dock_restore_button.set_no_show_all(True)
+        self.dock_restore_button.set_tooltip_text("Restore the dock layout saved before Linux Toolbox changed it.")
         self.dock_restore_button.connect("clicked", self.on_dock_restore_layout)
         layout_grid.attach(self.dock_restore_button, 1, 0, 1, 1)
 
@@ -1859,6 +2604,12 @@ class App(Gtk.ApplicationWindow):
             self.style_buttons[action] = button
             style_grid.attach(button, index % 2, index // 2, 1, 1)
 
+        self.style_restore_button = Gtk.Button(label="Restore Original")
+        self.style_restore_button.set_no_show_all(True)
+        self.style_restore_button.set_tooltip_text("Restore the dock click behavior saved before Linux Toolbox changed it.")
+        self.style_restore_button.connect("clicked", self.on_dock_restore_style)
+        style_grid.attach(self.style_restore_button, 0, 2, 2, 1)
+
         self.style_description = Gtk.Label()
         self.style_description.set_xalign(0)
         self.style_description.set_line_wrap(True)
@@ -1868,53 +2619,87 @@ class App(Gtk.ApplicationWindow):
         clipboard_intro.set_markup("<span size='large'><b>Clipboard</b></span>")
         clipboard_intro.set_xalign(0)
         clipboard_intro.set_line_wrap(True)
+        clipboard_intro.get_style_context().add_class("page-title")
         clipboard_tab.pack_start(clipboard_intro, False, False, 0)
 
         clipboard_description = Gtk.Label(label="Use CopyQ for a smooth community-tested Super+V clipboard history popup.")
         clipboard_description.set_xalign(0)
         clipboard_description.set_line_wrap(True)
+        clipboard_description.get_style_context().add_class("page-description")
         clipboard_tab.pack_start(clipboard_description, False, False, 0)
 
-        clipboard_card = self.create_card("Clipboard History", "CopyQ keeps a history of what you copy. Pick the parts you want.")
+        clipboard_card = self.create_card("Status Check", "CopyQ dependency and current shortcut state.")
         clipboard_tab.pack_start(clipboard_card, False, False, 0)
+        self.clipboard_status_pills = self.create_status_table(
+            clipboard_card,
+            (
+                ("copyq", "CopyQ"),
+                ("running", "CopyQ running"),
+                ("autostart", "Start at login"),
+                ("shortcut", "Super+V shortcut"),
+            ),
+        )
+
+        clipboard_setup_card = self.create_card("Setup Flow", "One switch installs and enables the complete clipboard history setup.")
+        clipboard_tab.pack_start(clipboard_setup_card, False, False, 0)
+        self.clipboard_master_switch = self.create_feature_switch(
+            clipboard_setup_card,
+            "Clipboard History",
+            "Start CopyQ at login and bind Super+V to the history popup.",
+            self.on_clipboard_master_toggled,
+        )
 
         self.clipboard_autostart_check, self.clipboard_autostart_pill = self.create_feature_check(
-            clipboard_card,
+            clipboard_setup_card,
             "Start CopyQ at login",
             "Launch CopyQ automatically when you log in, so clipboard history is always running.",
             self.on_clipboard_autostart_toggled,
         )
         self.clipboard_shortcut_check, self.clipboard_shortcut_pill = self.create_feature_check(
-            clipboard_card,
+            clipboard_setup_card,
             "Super+V opens clipboard history",
             "Bind Super+V to the CopyQ history popup. Frees Super+V from GNOME's notification tray so it works every time.",
             self.on_clipboard_shortcut_toggled,
         )
+        for widget in (self.clipboard_autostart_check, self.clipboard_shortcut_check):
+            row = getattr(widget, "ltb_row", None)
+            if row is not None:
+                row.set_no_show_all(True)
+                row.hide()
 
         clipboard_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         clipboard_actions.set_margin_top(6)
-        clipboard_card.pack_start(clipboard_actions, False, False, 0)
+        clipboard_setup_card.pack_start(clipboard_actions, False, False, 0)
 
         self.clipboard_clear_button = Gtk.Button(label="Clear Clipboard")
+        self.clipboard_clear_button.set_no_show_all(True)
         self.clipboard_clear_button.set_tooltip_text("Erase CopyQ history and the current system clipboard.")
         self.clipboard_clear_button.connect("clicked", self.on_clipboard_clear)
         clipboard_actions.pack_start(self.clipboard_clear_button, False, False, 0)
 
         self.clipboard_repair_button = Gtk.Button(label="Repair Clipboard")
+        self.clipboard_repair_button.set_no_show_all(True)
         self.clipboard_repair_button.set_tooltip_text("Recreate the CopyQ startup file, scripts, and Super+V shortcut.")
         self.clipboard_repair_button.connect("clicked", self.on_clipboard_repair_startup)
         clipboard_actions.pack_start(self.clipboard_repair_button, False, False, 0)
+
+        self.clipboard_restore_button = Gtk.Button(label="Restore Original")
+        self.clipboard_restore_button.set_no_show_all(True)
+        self.clipboard_restore_button.set_tooltip_text("Turn off Linux Toolbox clipboard startup and restore GNOME's Super+V binding.")
+        self.clipboard_restore_button.connect("clicked", self.on_clipboard_restore_original)
+        clipboard_actions.pack_start(self.clipboard_restore_button, False, False, 0)
 
         self.clipboard_status_label = Gtk.Label()
         self.clipboard_status_label.set_xalign(0)
         self.clipboard_status_label.set_line_wrap(True)
         self.clipboard_status_label.get_style_context().add_class("section-subtitle")
-        clipboard_card.pack_start(self.clipboard_status_label, False, False, 0)
+        clipboard_setup_card.pack_start(self.clipboard_status_label, False, False, 0)
 
         vietnamese_intro = Gtk.Label()
         vietnamese_intro.set_markup("<span size='large'><b>Vietnamese Input</b></span>")
         vietnamese_intro.set_xalign(0)
         vietnamese_intro.set_line_wrap(True)
+        vietnamese_intro.get_style_context().add_class("page-title")
         vietnamese_tab.pack_start(vietnamese_intro, False, False, 0)
 
         vietnamese_description = Gtk.Label(
@@ -1922,6 +2707,7 @@ class App(Gtk.ApplicationWindow):
         )
         vietnamese_description.set_xalign(0)
         vietnamese_description.set_line_wrap(True)
+        vietnamese_description.get_style_context().add_class("page-description")
         vietnamese_tab.pack_start(vietnamese_description, False, False, 0)
 
         vietnamese_powered = Gtk.Label(label="UniKey-like Vietnamese Input - Powered by ibus-bamboo")
@@ -1946,10 +2732,9 @@ class App(Gtk.ApplicationWindow):
                 ("Overall", self.vietnamese_status_pill),
                 ("IBus", self.vietnamese_ibus_pill),
                 ("ibus-bamboo", self.vietnamese_bamboo_pill),
-                ("Current input framework", self.vietnamese_framework_pill),
-                ("Current desktop session", self.vietnamese_session_pill),
-                ("Vietnamese input source", self.vietnamese_source_pill),
-                ("Recommended mode", self.vietnamese_mode_pill),
+                ("Framework", self.vietnamese_framework_pill),
+                ("Session", self.vietnamese_session_pill),
+                ("Input source", self.vietnamese_source_pill),
             )
         ):
             label = Gtk.Label(label=label_text)
@@ -1964,6 +2749,8 @@ class App(Gtk.ApplicationWindow):
 
         vietnamese_actions_card = self.create_card("Actions", "Install, fix, restart, or restore Vietnamese input.")
         vietnamese_tab.pack_start(vietnamese_actions_card, False, False, 0)
+        self.vietnamese_actions_card = vietnamese_actions_card
+        vietnamese_actions_card.set_no_show_all(True)
         vietnamese_actions = Gtk.Grid(column_spacing=10, row_spacing=10)
         vietnamese_actions_card.pack_start(vietnamese_actions, False, False, 0)
 
@@ -1992,8 +2779,9 @@ class App(Gtk.ApplicationWindow):
         self.vietnamese_restart_button.connect("clicked", self.on_vietnamese_restart)
         vietnamese_actions.attach(self.vietnamese_restart_button, 1, 1, 1, 1)
 
-        self.vietnamese_restore_button = Gtk.Button(label="Restore Previous Settings")
-        self.vietnamese_restore_button.set_tooltip_text("Restore Vietnamese input settings backed up before the last fix.")
+        self.vietnamese_restore_button = Gtk.Button(label="Restore Original")
+        self.vietnamese_restore_button.set_no_show_all(True)
+        self.vietnamese_restore_button.set_tooltip_text("Restore Vietnamese input settings saved before Linux Toolbox changed them.")
         self.vietnamese_restore_button.connect("clicked", self.on_vietnamese_restore)
         vietnamese_actions.attach(self.vietnamese_restore_button, 0, 2, 2, 1)
 
@@ -2003,6 +2791,9 @@ class App(Gtk.ApplicationWindow):
 
         compatibility_card = self.create_card("Compatibility Fixes", "Safe recommendations for common app input issues.")
         vietnamese_tab.pack_start(compatibility_card, False, False, 0)
+        compatibility_card.set_no_show_all(True)
+        compatibility_card.hide()
+        self.vietnamese_compatibility_card = compatibility_card
         self.vietnamese_compatibility_label = Gtk.Label()
         self.vietnamese_compatibility_label.set_xalign(0)
         self.vietnamese_compatibility_label.set_line_wrap(True)
@@ -2010,13 +2801,16 @@ class App(Gtk.ApplicationWindow):
 
         vietnamese_log_card = self.create_card("Live Log", "Vietnamese input check, install, and fix output.")
         vietnamese_tab.pack_start(vietnamese_log_card, True, True, 0)
+        vietnamese_log_card.set_no_show_all(True)
+        vietnamese_log_card.hide()
+        self.vietnamese_log_card = vietnamese_log_card
         self.vietnamese_log_view = Gtk.TextView()
         self.vietnamese_log_view.set_editable(False)
         self.vietnamese_log_view.set_cursor_visible(False)
         self.vietnamese_log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.vietnamese_log_view.set_monospace(True)
         vietnamese_log_scroller = Gtk.ScrolledWindow()
-        vietnamese_log_scroller.set_min_content_height(180)
+        vietnamese_log_scroller.set_min_content_height(72)
         vietnamese_log_scroller.add(self.vietnamese_log_view)
         vietnamese_log_card.pack_start(vietnamese_log_scroller, True, True, 0)
 
@@ -2052,14 +2846,15 @@ class App(Gtk.ApplicationWindow):
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.get_style_context().add_class("content-page")
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        page.set_border_width(20)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_border_width(16)
+        page.set_size_request(720, -1)
         scroller.add(page)
         return scroller, page
 
     def create_card(self, title, subtitle=None):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.set_border_width(14)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(10)
         box.get_style_context().add_class("card")
 
         label = Gtk.Label()
@@ -2075,9 +2870,26 @@ class App(Gtk.ApplicationWindow):
             box.pack_start(subtitle_label, False, False, 0)
         return box
 
+    def create_status_table(self, parent, rows):
+        grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+        grid.get_style_context().add_class("data-grid")
+        values = {}
+        for row_index, (key, label_text) in enumerate(rows):
+            label = Gtk.Label(label=label_text)
+            label.set_xalign(0)
+            label.set_halign(Gtk.Align.START)
+            grid.attach(label, 0, row_index, 1, 1)
+            pill = self.make_pill("Unknown", "warn")
+            grid.attach(pill, 1, row_index, 1, 1)
+            values[key] = pill
+        parent.pack_start(grid, False, False, 0)
+        return values
+
     def make_pill(self, text, level):
         label = Gtk.Label(label=text)
         label.set_xalign(0.5)
+        label.set_halign(Gtk.Align.START)
+        label.set_valign(Gtk.Align.CENTER)
         context = label.get_style_context()
         context.add_class("pill")
         context.add_class(f"pill-{level}")
@@ -2126,17 +2938,120 @@ class App(Gtk.ApplicationWindow):
 
     def create_primary_button(self, title, tooltip):
         button = Gtk.Button(label=title)
+        button.set_no_show_all(True)
         button.set_tooltip_text(tooltip)
         button.set_hexpand(True)
         button.get_style_context().add_class("suggested-action")
         return button
 
-    def create_feature_switch(self, parent, title, detail, callback):
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        row.set_margin_top(2)
-        row.set_margin_bottom(2)
+    def create_aitools_entry_row(self, grid, row, label_text, placeholder="", secret=False):
+        label = Gtk.Label(label=label_text)
+        label.set_xalign(0)
+        grid.attach(label, 0, row, 1, 1)
 
-        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        entry = Gtk.Entry()
+        entry.set_placeholder_text(placeholder)
+        entry.set_hexpand(True)
+        if secret:
+            entry.set_visibility(False)
+        entry.connect("changed", self.on_aitools_field_changed)
+        grid.attach(entry, 1, row, 3, 1)
+        return entry
+
+    def create_aitools_mode_row(self, grid, row, label_text="Mode"):
+        label = Gtk.Label(label=label_text)
+        label.set_xalign(0)
+        grid.attach(label, 0, row, 1, 1)
+
+        combo = Gtk.ComboBoxText()
+        combo.append("bifrost", "Bifrost")
+        combo.append("web", "Web login")
+        combo.set_active_id("bifrost")
+        combo.set_hexpand(True)
+        combo.connect("changed", self.on_aitools_field_changed)
+        grid.attach(combo, 1, row, 3, 1)
+        return combo
+
+    def create_aitools_path_row(self, grid, row, label_text, path):
+        label = Gtk.Label(label=label_text)
+        label.set_xalign(0)
+        grid.attach(label, 0, row, 1, 1)
+
+        value = Gtk.Label(label=str(path))
+        value.set_xalign(0)
+        value.set_selectable(True)
+        value.set_line_wrap(True)
+        value.get_style_context().add_class("section-subtitle")
+        grid.attach(value, 1, row, 3, 1)
+        return value
+
+    def create_aitools_summary_table(self, parent):
+        grid = Gtk.Grid(column_spacing=18, row_spacing=10)
+        grid.set_column_homogeneous(False)
+        grid.get_style_context().add_class("data-grid")
+        headers = ("Status", "Target", "Mode", "Config", "Runtime", "")
+        for column, text in enumerate(headers):
+            label = Gtk.Label()
+            label.set_markup(f"<b>{GLib.markup_escape_text(text)}</b>")
+            label.set_xalign(0)
+            label.set_halign(Gtk.Align.START)
+            label.set_valign(Gtk.Align.CENTER)
+            label.get_style_context().add_class("table-header")
+            grid.attach(label, column, 0, 1, 1)
+
+        self.aitools_summary_labels = {}
+        for row, (target, title, _tool, _path) in enumerate(AITOOLS_TARGETS, start=1):
+            status = self.make_pill("Setup", "warn")
+            status.set_size_request(96, -1)
+            grid.attach(status, 0, row, 1, 1)
+
+            title_label = Gtk.Label(label=title)
+            title_label.set_xalign(0)
+            title_label.set_halign(Gtk.Align.START)
+            title_label.set_valign(Gtk.Align.CENTER)
+            title_label.set_width_chars(20)
+            title_label.set_max_width_chars(22)
+            title_label.set_ellipsize(Pango.EllipsizeMode.END)
+            title_label.get_style_context().add_class("table-cell")
+            grid.attach(title_label, 1, row, 1, 1)
+            self.aitools_summary_labels[target] = {"status": status}
+            for column, key, width in (
+                (2, "mode", 10),
+                (3, "config", 38),
+                (4, "runtime", 22),
+            ):
+                value = Gtk.Label(label="Unknown")
+                value.set_xalign(0)
+                value.set_halign(Gtk.Align.START)
+                value.set_valign(Gtk.Align.CENTER)
+                value.set_width_chars(width)
+                value.set_max_width_chars(width)
+                if key == "mode":
+                    value.set_ellipsize(Pango.EllipsizeMode.END)
+                else:
+                    value.set_line_wrap(True)
+                    value.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                value.get_style_context().add_class("section-subtitle")
+                value.get_style_context().add_class("table-cell")
+                grid.attach(value, column, row, 1, 1)
+                self.aitools_summary_labels[target][key] = value
+
+            edit_button = Gtk.Button(label="Edit")
+            edit_button.set_tooltip_text(f"Edit {title} config.")
+            edit_button.set_halign(Gtk.Align.END)
+            edit_button.set_valign(Gtk.Align.CENTER)
+            edit_button.get_style_context().add_class("secondary-action")
+            edit_button.connect("clicked", self.on_aitools_edit_target, target)
+            grid.attach(edit_button, 5, row, 1, 1)
+            self.aitools_summary_labels[target]["edit"] = edit_button
+        parent.pack_start(grid, False, False, 0)
+
+    def create_feature_switch(self, parent, title, detail, callback):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.set_margin_top(0)
+        row.set_margin_bottom(0)
+
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         label = Gtk.Label()
         label.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>")
         label.set_xalign(0)
@@ -2149,6 +3064,7 @@ class App(Gtk.ApplicationWindow):
         switch = Gtk.Switch()
         switch.set_valign(Gtk.Align.CENTER)
         switch.connect("state-set", callback)
+        switch.ltb_row = row
 
         row.pack_start(copy, True, True, 0)
         row.pack_end(switch, False, False, 0)
@@ -2161,14 +3077,14 @@ class App(Gtk.ApplicationWindow):
         Returns (check_button, pill_label). The check emits `toggled`; handlers
         should guard against programmatic updates using self.syncing_features.
         """
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        row.set_margin_top(2)
-        row.set_margin_bottom(2)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.set_margin_top(0)
+        row.set_margin_bottom(0)
 
         check = Gtk.CheckButton()
         check.set_valign(Gtk.Align.START)
 
-        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         label = Gtk.Label()
         label.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>")
         label.set_xalign(0)
@@ -2183,6 +3099,8 @@ class App(Gtk.ApplicationWindow):
         pill.set_valign(Gtk.Align.CENTER)
 
         check.connect("toggled", callback)
+        check.ltb_row = row
+        pill.ltb_row = row
         row.pack_start(check, False, False, 0)
         row.pack_start(copy, True, True, 0)
         row.pack_end(pill, False, False, 0)
@@ -2235,12 +3153,46 @@ class App(Gtk.ApplicationWindow):
 
     def refresh_feature_state(self):
         self.syncing_features = True
-        self.profile_switch.set_active(self.profile_feature_enabled())
-        self.hover_switch.set_active(self.hover_feature_enabled())
+        profile_enabled = self.profile_feature_enabled()
+        hover_enabled = self.hover_feature_enabled()
+        self.profile_switch.set_active(profile_enabled)
+        self.hover_switch.set_active(hover_enabled)
         if hasattr(self, "clipboard_autostart_check"):
             self.clipboard_autostart_check.set_active(self.clipboard_autostart_active())
             self.clipboard_shortcut_check.set_active(self.clipboard_shortcut_active())
+        if hasattr(self, "clipboard_master_switch"):
+            self.clipboard_master_switch.set_active(self.clipboard_feature_enabled())
         self.syncing_features = False
+        if hasattr(self, "chrome_status_pills"):
+            config_dir, _browser_id = detect_chrome_config()
+            browser_available = any(
+                shutil.which(binary)
+                for binary in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+            )
+            profiles_found = len(self.profiles)
+            self.profile_switch.set_sensitive(bool(profiles_found and browser_available))
+            self.set_pill(
+                self.chrome_status_pills["browser"],
+                "installed" if browser_available else "missing",
+                "ok" if browser_available else "err",
+            )
+            self.set_pill(
+                self.chrome_status_pills["profiles"],
+                str(profiles_found) if profiles_found else ("not found" if config_dir.exists() else "no config"),
+                "ok" if profiles_found else "warn",
+            )
+            self.set_pill(
+                self.chrome_status_pills["icons"],
+                "on" if profile_enabled else "off",
+                "ok" if profile_enabled else "warn",
+            )
+            self.set_pill(
+                self.chrome_status_pills["hover"],
+                "on" if hover_enabled else "off",
+                "ok" if hover_enabled else "warn",
+            )
+        if hasattr(self, "chrome_restore_button"):
+            self.chrome_restore_button.set_visible(False)
         self.refresh_clipboard_state()
         self.refresh_overview_summary()
 
@@ -2255,13 +3207,33 @@ class App(Gtk.ApplicationWindow):
         if hasattr(self, "clipboard_autostart_pill"):
             self.set_pill(self.clipboard_autostart_pill, "On" if autostart_active else "Off", "ok" if autostart_active else "warn")
             self.set_pill(self.clipboard_shortcut_pill, "On" if shortcut_active else "Off", "ok" if shortcut_active else "warn")
+        if hasattr(self, "clipboard_status_pills"):
+            self.set_pill(self.clipboard_status_pills["copyq"], "installed" if copyq_available else "missing", "ok" if copyq_available else "err")
+            self.set_pill(self.clipboard_status_pills["running"], "running" if running else "stopped", "ok" if running else "warn")
+            self.set_pill(self.clipboard_status_pills["autostart"], "on" if autostart_active else "off", "ok" if autostart_active else "warn")
+            self.set_pill(self.clipboard_status_pills["shortcut"], "on" if shortcut_active else "off", "ok" if shortcut_active else "warn")
 
         # Controls depend on CopyQ being installed.
-        for widget in ("clipboard_autostart_check", "clipboard_shortcut_check", "clipboard_clear_button", "clipboard_repair_button"):
+        for widget in ("clipboard_autostart_check", "clipboard_shortcut_check", "clipboard_clear_button", "clipboard_repair_button", "clipboard_restore_button"):
             if hasattr(self, widget):
                 getattr(self, widget).set_sensitive(copyq_available)
         if hasattr(self, "clipboard_clear_button"):
             self.clipboard_clear_button.set_sensitive(copyq_available and running)
+            self.clipboard_clear_button.set_visible(False)
+        if hasattr(self, "clipboard_repair_button"):
+            self.clipboard_repair_button.set_visible(False)
+        if hasattr(self, "clipboard_restore_button"):
+            restore_needed = (
+                autostart_active
+                or shortcut_active
+                or self.clipboard_autostart_saved()
+                or self.clipboard_shortcut_saved()
+                or COPYQ_START.exists()
+                or COPYQ_SHORTCUT.exists()
+                or COPYQ_CLEAR.exists()
+            )
+            self.clipboard_restore_button.set_sensitive(restore_needed)
+            self.clipboard_restore_button.set_visible(False)
 
         lines = [
             f"CopyQ: {'installed' if copyq_available else 'not installed — toggle a setting to install'}",
@@ -2305,10 +3277,17 @@ class App(Gtk.ApplicationWindow):
             aitools_ready = self.aitools_service.isInstalled()
             aitools_status = self.aitools_service.configStatus(self.aitools_config())
             ai_commands = self.aitools_service.terminalCommandsInstalled()
+            ai_key_saved = bool(
+                aitools_status.get("codexCli")
+                or aitools_status.get("claudeCli")
+                or aitools_status.get("savedToken")
+                or aitools_status.get("token")
+            )
         except Exception:
             aitools_ready = False
             aitools_status = {"token": False}
             ai_commands = False
+            ai_key_saved = False
         try:
             style_action = run(["gsettings", "get", DASH_TO_DOCK_SCHEMA, "click-action"], check=False).strip("'")
         except Exception:
@@ -2320,8 +3299,8 @@ class App(Gtk.ApplicationWindow):
 
         pills = [
             (
-                "AI Tools: Commands" if ai_commands else ("AI Tools: Key saved" if aitools_status.get("token") else "AI Tools: Setup"),
-                "ok" if ai_commands else ("warn" if aitools_ready or aitools_status.get("token") else "err"),
+                "AI Tools: Commands" if ai_commands else ("AI Tools: Key saved" if ai_key_saved else "AI Tools: Setup"),
+                "ok" if ai_commands else ("warn" if aitools_ready or ai_key_saved else "err"),
             ),
             ("Chrome Profiles: On" if chrome_ready else "Chrome Profiles: Setup", "ok" if chrome_ready else "warn"),
             ("Hover Previews: On" if hover_ready else "Hover Previews: Off", "ok" if hover_ready else "warn"),
@@ -2343,30 +3322,215 @@ class App(Gtk.ApplicationWindow):
         for text, level in pills:
             self.overview_summary_box.add(self.make_pill(text, level))
         self.overview_summary_box.show_all()
+        self.refresh_overview_restore_actions()
+
+    def refresh_overview_restore_actions(self):
+        if not hasattr(self, "overview_restore_buttons"):
+            return
+        visible_any = False
+
+        try:
+            ai_config = self.aitools_service.configStatus(self.aitools_config())
+            ai_needed = bool(
+                ai_config.get("codexCliCommand")
+                or ai_config.get("claudeCliCommand")
+                or ai_config.get("codexCliHome")
+                or ai_config.get("codexVscodeConfig")
+                or ai_config.get("claudeVscodeConfig")
+            )
+        except Exception:
+            ai_needed = False
+
+        try:
+            chrome_needed = self.profile_feature_enabled() or self.hover_feature_enabled()
+        except Exception:
+            chrome_needed = False
+
+        mouse_needed = MOUSE_ORIGINAL_BACKUP_PATH.exists()
+        mouse_ready = mouse_needed and self.mouse_service.isMaccelInstalled()
+
+        try:
+            clipboard_needed = (
+                self.clipboard_autostart_active()
+                or self.clipboard_shortcut_active()
+                or self.clipboard_autostart_saved()
+                or self.clipboard_shortcut_saved()
+                or COPYQ_START.exists()
+                or COPYQ_SHORTCUT.exists()
+                or COPYQ_CLEAR.exists()
+            )
+        except Exception:
+            clipboard_needed = False
+
+        vietnamese_state = load_app_config().get("vietnameseInput")
+        vietnamese_needed = isinstance(vietnamese_state, dict) and bool(
+            vietnamese_state.get("originalInputSources") or vietnamese_state.get("previousInputSources")
+        )
+
+        try:
+            dock_layout_needed = self.dock_layout_restore_available()
+        except Exception:
+            dock_layout_needed = False
+        try:
+            dock_style_needed = self.dock_style_restore_available()
+        except Exception:
+            dock_style_needed = False
+
+        states = {
+            "aitools": (ai_needed, ai_needed),
+            "chrome": (chrome_needed, chrome_needed),
+            "mouse": (mouse_needed, mouse_ready),
+            "clipboard": (clipboard_needed, clipboard_needed),
+            "vietnamese": (vietnamese_needed, vietnamese_needed),
+            "dock_layout": (dock_layout_needed, dock_layout_needed),
+            "dock_style": (dock_style_needed, dock_style_needed),
+        }
+        for key, (visible, sensitive) in states.items():
+            button = self.overview_restore_buttons[key]
+            button.set_visible(visible)
+            button.set_sensitive(sensitive)
+            visible_any = visible_any or visible
+        self.overview_restore_card.set_visible(visible_any)
 
     def refresh_aitools_state(self):
         if not hasattr(self, "aitools_status_label"):
             return
-        installed = self.aitools_service.isInstalled()
-        executable = self.aitools_service.executable_path()
         settings = self.aitools_config()
         config = self.aitools_service.configStatus(settings)
-        commands_installed = self.aitools_service.terminalCommandsInstalled()
-        bifrost_ready = config["baseUrl"] and config["token"]
-        all_ready = bifrost_ready and commands_installed and config["personalClaude"] and config["personalCodex"]
+        targets = config.get("targets", {})
+        all_ready = bool(targets) and all(
+            item.get("runtime")
+            and (
+                (item.get("mode") == "web" and item.get("config"))
+                or (item.get("mode") == "bifrost" and item.get("bifrost"))
+            )
+            for item in targets.values()
+        )
 
         self.set_pill(self.aitools_status_pill, "Ready" if all_ready else "Setup", "ok" if all_ready else "warn")
+        if hasattr(self, "aitools_dependency_pills"):
+            self.set_pill(
+                self.aitools_dependency_pills["codex"],
+                "installed" if config.get("personalCodex") else "missing",
+                "ok" if config.get("personalCodex") else "err",
+            )
+            self.set_pill(
+                self.aitools_dependency_pills["claude"],
+                "installed" if config.get("personalClaude") else "missing",
+                "ok" if config.get("personalClaude") else "warn",
+            )
+            self.set_pill(
+                self.aitools_dependency_pills["bicodex"],
+                "ready" if config.get("codexCliCommand") else "missing",
+                "ok" if config.get("codexCliCommand") else "warn",
+            )
+            self.set_pill(
+                self.aitools_dependency_pills["biclaude"],
+                "ready" if config.get("claudeCliCommand") else "missing",
+                "ok" if config.get("claudeCliCommand") else "warn",
+            )
+            has_bifrost = bool(config.get("savedToken") or config.get("token"))
+            self.set_pill(
+                self.aitools_dependency_pills["bifrost"],
+                "saved" if has_bifrost else "not set",
+                "ok" if has_bifrost else "warn",
+            )
+        if hasattr(self, "aitools_codex_cli_pill"):
+            pill_map = {
+                "codexCli": self.aitools_codex_cli_pill,
+                "claudeCli": self.aitools_claude_cli_pill,
+                "codexVscode": self.aitools_codex_vscode_pill,
+                "claudeVscode": self.aitools_claude_vscode_pill,
+            }
+            for target, pill in pill_map.items():
+                item = targets.get(target, {})
+                ready = item.get("runtime") and (
+                    (item.get("mode") == "web" and item.get("config"))
+                    or (item.get("mode") == "bifrost" and item.get("bifrost"))
+                )
+                self.set_pill(pill, "Ready" if ready else "Setup", "ok" if ready else "warn")
+
+        if hasattr(self, "aitools_summary_labels"):
+            for target, title, tool, path in AITOOLS_TARGETS:
+                item = targets.get(target, {})
+                mode = item.get("mode", "unknown")
+                account = item.get("accountLabel", "")
+                source = item.get("source", "")
+                base_url = item.get("baseUrl", "")
+                model = item.get("model", "")
+                if mode == "bifrost":
+                    if item.get("bifrost"):
+                        details = []
+                        if base_url:
+                            details.append(f"URL: {base_url}")
+                        if model:
+                            details.append(f"model: {model}")
+                        config_text = "Bifrost" + (f" ({', '.join(details)})" if details else "")
+                    else:
+                        config_text = "Bifrost key missing"
+                else:
+                    config_text = f"Web login{f': {account}' if account else ''}"
+                    if target in {"codexVscode", "claudeVscode"}:
+                        config_text += " (config found)" if item.get("config") else " (not found yet)"
+                if source and source != "saved":
+                    config_text += f" | source: {source}"
+                elif source == "saved":
+                    config_text += " | source: Linux Toolbox saved draft"
+                if target == "codexCli":
+                    runtime_text = "bicodex ready" if item.get("runtime") else f"{tool} missing or wrapper not installed"
+                elif target == "claudeCli":
+                    runtime_text = "biclaude ready" if item.get("runtime") else f"{tool} missing or wrapper not installed"
+                else:
+                    runtime_text = f"{path}"
+                ready = item.get("runtime") and (
+                    (mode == "web" and item.get("config")) or (mode == "bifrost" and item.get("bifrost"))
+                )
+                self.set_pill(
+                    self.aitools_summary_labels[target]["status"],
+                    "✓ Configured" if ready else "Setup",
+                    "ok" if ready else "warn",
+                )
+                self.aitools_summary_labels[target]["mode"].set_text("Bifrost" if mode == "bifrost" else "Web login")
+                self.aitools_summary_labels[target]["config"].set_text(config_text)
+                self.aitools_summary_labels[target]["runtime"].set_text(runtime_text)
+
         lines = [
-            f"codex: {'available' if config['personalCodex'] else 'not found'}",
-            f"claude: {'available' if config['personalClaude'] else 'not found'}",
-            f"bicodex: {'installed' if BICODEX_COMMAND.exists() else 'not installed'}",
-            f"biclaude: {'installed' if BICLAUDE_COMMAND.exists() else 'not installed'}",
-            f"aitools: {executable or 'not found'}",
-            f"Bifrost base URL: {'saved' if config['savedBaseUrl'] else ('detected' if config['baseUrl'] else 'not configured')}",
-            f"Bifrost key: {'saved' if config['savedToken'] else ('detected' if config['token'] else 'not configured')}",
-            f"Terminal path: {BIN_DIR}",
+            f"{title}: {('Bifrost' if targets.get(target, {}).get('mode') == 'bifrost' else 'Web login')}"
+            f" - {'ready' if targets.get(target, {}).get('runtime') and ((targets.get(target, {}).get('mode') == 'web' and targets.get(target, {}).get('config')) or (targets.get(target, {}).get('mode') == 'bifrost' and targets.get(target, {}).get('bifrost'))) else 'needs setup'}"
+            for target, title, _tool, _path in AITOOLS_TARGETS
+        ] + [
+            f"Command folder: {BIN_DIR}",
         ]
         self.aitools_status_label.set_text("\n".join(lines))
+        if hasattr(self, "aitools_install_codex_button"):
+            codex_installed = bool(config.get("personalCodex"))
+            claude_installed = bool(config.get("personalClaude"))
+            codex_ready = bool(config.get("codexCli"))
+            claude_ready = bool(config.get("claudeCli"))
+            has_bifrost = bool(config.get("savedToken") or config.get("token"))
+            self.aitools_install_codex_button.set_visible(not codex_installed)
+            self.aitools_install_codex_command_button.set_visible(codex_installed and not codex_ready)
+            self.aitools_install_claude_command_button.set_visible(claude_installed and not claude_ready)
+            self.aitools_bifrost_portal_button.set_visible(has_bifrost)
+            restore_needed = bool(
+                config.get("codexCliCommand")
+                or config.get("claudeCliCommand")
+                or config.get("codexCliHome")
+                or config.get("codexVscodeConfig")
+                or config.get("claudeVscodeConfig")
+            )
+            self.aitools_restore_button.set_visible(False)
+            self.aitools_actions_card.set_visible(
+                any(
+                    widget.get_visible()
+                    for widget in (
+                        self.aitools_install_codex_button,
+                        self.aitools_install_codex_command_button,
+                        self.aitools_install_claude_command_button,
+                        self.aitools_bifrost_portal_button,
+                    )
+                )
+            )
         self.refresh_overview_summary()
 
     def aitools_config(self):
@@ -2385,26 +3549,185 @@ class App(Gtk.ApplicationWindow):
     def selected_aitools_mode(self):
         return "bifrost"
 
+    def set_aitools_combo(self, combo, value):
+        combo.set_active_id(value if value in {"bifrost", "web"} else "bifrost")
+
+    def aitools_combo_value(self, combo):
+        return combo.get_active_id() or "bifrost"
+
     def load_aitools_account_fields(self):
-        if not hasattr(self, "aitools_bifrost_base_entry"):
-            return
-        config = self.aitools_config()
-        self.aitools_bifrost_base_entry.set_text(str(config.get("bifrostBaseUrl", "")))
-        self.aitools_bifrost_token_entry.set_text(str(config.get("bifrostToken", "")))
+        self.refresh_aitools_state()
 
     def collect_aitools_account_fields(self):
-        return {
-            "connectionMode": "bifrost",
-            "bifrostBaseUrl": self.aitools_bifrost_base_entry.get_text().strip(),
-            "bifrostToken": self.aitools_bifrost_token_entry.get_text().strip(),
-        }
+        return self.aitools_config()
+
+    def update_aitools_mode_controls(self):
+        return
 
     def save_aitools_account_fields(self):
-        values = self.collect_aitools_account_fields()
-        self.save_aitools_config(values)
+        values = self.aitools_config()
+        try:
+            self.aitools_service.applyRealtimeConfig(values)
+        except Exception:
+            pass
         if self.aitools_service.desktopLauncherInstalled() and self.aitools_service.isInstalled():
             self.aitools_service.installDesktopLauncher()
         return values
+
+    def aitools_target_meta(self, target):
+        for item in AITOOLS_TARGETS:
+            if item[0] == target:
+                return item
+        raise RuntimeError(f"Unknown AI Tools target: {target}")
+
+    def save_aitools_target_config(self, target, values):
+        config = load_app_config()
+        current = config.get("aiTools", {})
+        if not isinstance(current, dict):
+            current = {}
+        current["connectionMode"] = "split"
+        current[target] = values
+        if target == "codexCli":
+            current["bifrostBaseUrl"] = values.get("bifrostBaseUrl", "")
+            current["bifrostToken"] = values.get("bifrostToken", "")
+            current["selectedModel"] = values.get("selectedModel", "")
+        config["aiTools"] = current
+        save_app_config(config)
+        self.aitools_service.applyRealtimeConfig(current)
+        return current
+
+    def create_dialog_entry(self, grid, row, label_text, text="", placeholder="", secret=False):
+        label = Gtk.Label(label=label_text)
+        label.set_xalign(0)
+        grid.attach(label, 0, row, 1, 1)
+
+        entry = Gtk.Entry()
+        entry.set_text(text or "")
+        entry.set_placeholder_text(placeholder)
+        entry.set_hexpand(True)
+        if secret:
+            entry.set_visibility(False)
+        grid.attach(entry, 1, row, 2, 1)
+        return entry
+
+    def open_aitools_target_dialog(self, target):
+        _target, title, tool, path = self.aitools_target_meta(target)
+        settings = self.aitools_config()
+        values = self.aitools_service.actualTargetConfig(settings, target)
+
+        dialog = Gtk.Dialog(
+            title=f"Edit {title}",
+            transient_for=self,
+            flags=Gtk.DialogFlags.MODAL,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.set_default_size(560, -1)
+
+        content = dialog.get_content_area()
+        content.set_spacing(12)
+        content.set_border_width(12)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        content.pack_start(grid, False, False, 0)
+
+        mode_label = Gtk.Label(label="Mode")
+        mode_label.set_xalign(0)
+        grid.attach(mode_label, 0, 0, 1, 1)
+        mode_combo = Gtk.ComboBoxText()
+        mode_combo.append("bifrost", "Bifrost")
+        mode_combo.append("web", "Web login")
+        mode_combo.set_active_id(values.get("connectionMode", self.aitools_service.defaultMode(target)))
+        mode_combo.set_hexpand(True)
+        grid.attach(mode_combo, 1, 0, 2, 1)
+
+        base_entry = self.create_dialog_entry(
+            grid,
+            1,
+            "Bifrost URL",
+            values.get("bifrostBaseUrl", ""),
+            "https://bifrost.example.com/anthropic",
+        )
+        token_entry = self.create_dialog_entry(
+            grid,
+            2,
+            "Bifrost key",
+            values.get("bifrostToken", ""),
+            "sk-bf-...",
+            secret=True,
+        )
+        model_entry = self.create_dialog_entry(
+            grid,
+            3,
+            "Model",
+            values.get("selectedModel", ""),
+            "fridaycodex/gpt-5.5" if tool == "codex" else "claude-sonnet-4-5",
+        )
+        account_entry = self.create_dialog_entry(
+            grid,
+            4,
+            "Web account label",
+            values.get("accountLabel", ""),
+            "ddwang via web login" if tool == "codex" else "Claude web login",
+        )
+
+        path_label = Gtk.Label(label="Config path" if target in {"codexVscode", "claudeVscode"} else "Runtime path")
+        path_label.set_xalign(0)
+        grid.attach(path_label, 0, 5, 1, 1)
+        path_value = Gtk.Label(label=str(path))
+        path_value.set_xalign(0)
+        path_value.set_selectable(True)
+        path_value.set_line_wrap(True)
+        path_value.get_style_context().add_class("section-subtitle")
+        grid.attach(path_value, 1, 5, 2, 1)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        content.pack_start(actions, False, False, 0)
+        web_login_button = Gtk.Button(label=f"{'Codex' if tool == 'codex' else 'Claude'} Web Login")
+        web_login_button.set_tooltip_text(f"Run web login for {title}.")
+        portal_button = Gtk.Button(label="Bifrost Token Usage")
+        portal_button.set_tooltip_text(f"Open {BIFROST_PORTAL_URL}.")
+        actions.pack_start(web_login_button, True, True, 0)
+        actions.pack_start(portal_button, True, True, 0)
+
+        def update_sensitivity(*_args):
+            bifrost = (mode_combo.get_active_id() or "bifrost") == "bifrost"
+            for widget in (base_entry, token_entry, model_entry):
+                widget.set_sensitive(bifrost)
+            account_entry.set_sensitive(not bifrost)
+            web_login_button.set_sensitive(not bifrost)
+            portal_button.set_sensitive(bifrost)
+
+        def launch_web_login(_button):
+            try:
+                self.aitools_service.launchLogin(tool)
+                self.log(f"Opened {title} web login.")
+            except Exception as error:
+                self.log(f"Failed to open {title} web login: {error}")
+
+        mode_combo.connect("changed", update_sensitivity)
+        web_login_button.connect("clicked", launch_web_login)
+        portal_button.connect("clicked", self.on_aitools_open_bifrost_portal)
+        update_sensitivity()
+
+        dialog.show_all()
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            new_values = {
+                "connectionMode": mode_combo.get_active_id() or self.aitools_service.defaultMode(target),
+                "bifrostBaseUrl": base_entry.get_text().strip(),
+                "bifrostToken": token_entry.get_text().strip(),
+                "selectedModel": model_entry.get_text().strip(),
+                "accountLabel": account_entry.get_text().strip(),
+            }
+            try:
+                self.save_aitools_target_config(target, new_values)
+                self.log(f"Saved {title} config.")
+            except Exception as error:
+                self.log(f"Failed to save {title} config: {error}")
+        dialog.destroy()
+        self.refresh_aitools_state()
 
     def refresh_vietnamese_input_state(self):
         if not hasattr(self, "vietnamese_status_label"):
@@ -2418,6 +3741,8 @@ class App(Gtk.ApplicationWindow):
             self.vietnamese_status_label.set_text(f"Could not check Vietnamese input: {error}")
 
         install_running = self.vietnamese_install_process is not None and self.vietnamese_install_process.poll() is None
+        if hasattr(self, "vietnamese_log_card"):
+            self.vietnamese_log_card.set_visible(install_running)
         self.vietnamese_install_progress.set_visible(install_running)
         if install_running:
             self.vietnamese_install_progress.set_text("Installing Vietnamese input...")
@@ -2458,16 +3783,11 @@ class App(Gtk.ApplicationWindow):
             self.set_pill(self.vietnamese_mode_pill, "Telex", "ok")
 
             lines = [
-                f"OS: {diagnostics['os']}",
-                f"Desktop: {diagnostics['desktop']}",
+                f"Desktop: {diagnostics['desktop']} / {session_label}",
                 f"IBus daemon: {'running' if diagnostics['ibusDaemonRunning'] else 'not running'}",
-                f"Input sources: {diagnostics['inputSourcesRaw'] or 'unknown'}",
-                f"Bamboo config: {diagnostics['bambooConfigPath'] if diagnostics['bambooConfigExists'] else 'not found'}",
             ]
             if diagnostics["session"] == "wayland":
                 lines.append("Wayland warning: if Vietnamese input is unstable, try Xorg.")
-            if status == "Needs logout/login":
-                lines.append("You may need to log out and log back in for Vietnamese input to appear.")
             if not diagnostics["bambooConfigExists"]:
                 lines.append("Open ibus-bamboo preferences and choose Telex + Unicode after install.")
             self.vietnamese_status_label.set_text("\n".join(lines))
@@ -2475,10 +3795,16 @@ class App(Gtk.ApplicationWindow):
             self.vietnamese_install_button.set_sensitive(
                 diagnostics["pkexecAvailable"] and not diagnostics["bambooInstalled"] and not install_running
             )
+            self.vietnamese_install_button.set_visible(not diagnostics["bambooInstalled"])
             self.vietnamese_apply_button.set_sensitive(
                 diagnostics["ibusInstalled"] and diagnostics["bambooInstalled"] and not install_running
             )
+            self.vietnamese_apply_button.set_visible(
+                diagnostics["ibusInstalled"] and diagnostics["bambooInstalled"] and status != "Ready"
+            )
             self.vietnamese_restart_button.set_sensitive(diagnostics["ibusInstalled"] and not install_running)
+            self.vietnamese_restart_button.set_visible(diagnostics["ibusInstalled"] and not diagnostics["ibusDaemonRunning"])
+            self.vietnamese_check_button.set_visible(False)
         else:
             for pill in (
                 self.vietnamese_status_pill,
@@ -2491,7 +3817,17 @@ class App(Gtk.ApplicationWindow):
                 self.set_pill(pill, "Unknown", "warn")
 
         state = load_app_config().get("vietnameseInput")
-        self.vietnamese_restore_button.set_sensitive(isinstance(state, dict) and bool(state.get("previousInputSources")))
+        self.vietnamese_restore_button.set_sensitive(
+            isinstance(state, dict) and bool(state.get("originalInputSources") or state.get("previousInputSources"))
+        )
+        self.vietnamese_restore_button.set_visible(False)
+        if hasattr(self, "vietnamese_actions_card"):
+            self.vietnamese_actions_card.set_visible(
+                install_running
+                or self.vietnamese_install_button.get_visible()
+                or self.vietnamese_apply_button.get_visible()
+                or self.vietnamese_restart_button.get_visible()
+            )
         self.vietnamese_compatibility_label.set_text(
             "\n".join(
                 [
@@ -2517,17 +3853,58 @@ class App(Gtk.ApplicationWindow):
             self.mouse_permission_fix_process is not None
             and self.mouse_permission_fix_process.poll() is None
         )
+        if hasattr(self, "mouse_log_label"):
+            self.mouse_log_label.set_visible(install_running or fix_running)
+        if hasattr(self, "mouse_log_scroller"):
+            self.mouse_log_scroller.set_visible(install_running or fix_running)
+        if hasattr(self, "mouse_status_pills"):
+            self.set_pill(
+                self.mouse_status_pills["platform"],
+                env["sessionType"],
+                "ok" if supported else "err",
+            )
+            self.set_pill(
+                self.mouse_status_pills["pkexec"],
+                "available" if install_status["pkexecAvailable"] else "missing",
+                "ok" if install_status["pkexecAvailable"] else "err",
+            )
+            self.set_pill(
+                self.mouse_status_pills["maccel"],
+                "installed" if maccel_available else "missing",
+                "ok" if maccel_available else "err",
+            )
+            permission_ready = False
+            permission_label = "not checked"
+            if maccel_available:
+                try:
+                    permission_status = self.mouse_service.getPermissionStatus()
+                    permission_ready = permission_status.sensMultWritable
+                    permission_label = "ready" if permission_ready else "needs fix"
+                except Exception:
+                    permission_label = "unknown"
+            self.set_pill(
+                self.mouse_status_pills["permission"],
+                permission_label,
+                "ok" if permission_ready else ("warn" if maccel_available else "err"),
+            )
         self.mouse_windows_button.set_sensitive(maccel_available and not fix_running)
         self.mouse_macos_button.set_sensitive(maccel_available and not fix_running)
         self.mouse_restore_button.set_sensitive(
-            maccel_available and MOUSE_BACKUP_PATH.exists() and not fix_running
+            maccel_available and MOUSE_ORIGINAL_BACKUP_PATH.exists() and not fix_running
         )
+        self.mouse_windows_button.set_visible(maccel_available)
+        self.mouse_macos_button.set_visible(maccel_available)
+        self.mouse_restore_button.set_visible(False)
         if hasattr(self, "mouse_custom_sens_button"):
             self.mouse_custom_sens_button.set_sensitive(maccel_available and not fix_running)
             self.mouse_custom_sens_spin.set_sensitive(maccel_available and not fix_running)
+            self.mouse_custom_sens_button.set_visible(maccel_available)
+            self.mouse_custom_label.set_visible(maccel_available)
+            self.mouse_custom_row.set_visible(maccel_available)
         self.mouse_install_button.set_sensitive(
             supported and not maccel_available and install_status["pkexecAvailable"] and not install_running
         )
+        self.mouse_install_button.set_visible(supported and not maccel_available)
         self.mouse_install_progress.set_visible(install_running)
         if install_running:
             self.mouse_install_progress.set_text("Installing maccel...")
@@ -2552,32 +3929,22 @@ class App(Gtk.ApplicationWindow):
 
         install_lines = []
         if install_running:
-            install_lines.append("Install check: maccel install is running.")
+            install_lines.append("maccel install is running.")
             latest_line = self.latest_mouse_install_log_line()
             if latest_line:
                 install_lines.append(f"Progress: {latest_line}")
         elif install_status["maccelInstalled"]:
-            install_lines.append("Install check: maccel is installed.")
+            install_lines.append("maccel is installed.")
         elif not install_status["pkexecAvailable"]:
-            install_lines.append("Install check: pkexec is missing. Install maccel manually.")
+            install_lines.append("pkexec is missing. Install maccel manually.")
         else:
-            install_lines.append("Install check: ready to install maccel with authentication.")
+            install_lines.append("Ready to install maccel.")
 
         if install_status["missingCommands"]:
             install_lines.append("Missing tools: " + ", ".join(install_status["missingCommands"]))
-        else:
-            install_lines.append("Required tools: detected")
 
-        if install_status["kernelHeadersInstalled"]:
-            install_lines.append(f"Kernel headers: detected for {install_status['kernelRelease']}")
-        else:
-            install_lines.append(f"Kernel headers: will install for {install_status['kernelRelease']}")
-
-        if install_status["kernelCompiler"]:
-            compiler_state = "detected" if install_status["kernelCompilerInstalled"] else "will install"
-            install_lines.append(f"Kernel compiler: {compiler_state} {install_status['kernelCompiler']}")
-
-        install_lines.append(f"Install log: {install_status['installLogPath']}")
+        if not install_status["kernelHeadersInstalled"]:
+            install_lines.append(f"Kernel headers will install for {install_status['kernelRelease']}.")
         self.mouse_install_label.set_text("\n".join(install_lines))
         self.refresh_mouse_install_log_view()
 
@@ -2623,6 +3990,7 @@ class App(Gtk.ApplicationWindow):
             "macos": "macOS-like",
             "custom": "Custom SensMouse",
             "previous": "Previous",
+            "original": "Original restored",
             "default_ubuntu": "Default Ubuntu",
             "unknown": "Unknown",
         }
@@ -2717,12 +4085,21 @@ class App(Gtk.ApplicationWindow):
 
     def dock_layout_restore_available(self):
         state = load_app_config().get("dockLayout")
-        return isinstance(state, dict) and isinstance(state.get("previousSettings"), dict)
+        return isinstance(state, dict) and (
+            isinstance(state.get("originalSettings"), dict) or isinstance(state.get("previousSettings"), dict)
+        )
 
     def save_dock_layout_restore_point(self, previous_settings, active_preset):
         config = load_app_config()
+        existing = config.get("dockLayout")
+        original_settings = (
+            existing.get("originalSettings")
+            if isinstance(existing, dict) and isinstance(existing.get("originalSettings"), dict)
+            else previous_settings
+        )
         config["dockLayout"] = {
             "activePreset": active_preset,
+            "originalSettings": original_settings,
             "previousSettings": previous_settings,
             "savedAt": datetime.now(timezone.utc).isoformat(),
         }
@@ -2737,11 +4114,78 @@ class App(Gtk.ApplicationWindow):
         config["dockLayout"] = state
         save_app_config(config)
 
+    def read_dock_style_settings(self):
+        if not self.dash_to_dock_available():
+            raise RuntimeError("Dash-to-Dock settings are not available on this system.")
+        keys = ("click-action", "middle-click-action", "activate-single-window")
+        settings = {}
+        for key in keys:
+            value = run(["gsettings", "get", DASH_TO_DOCK_SCHEMA, key], check=False).strip()
+            if value:
+                settings[key] = value
+        if "click-action" not in settings:
+            raise RuntimeError("Could not read current dock click style.")
+        return settings
+
+    def apply_dock_style_settings(self, settings):
+        if not self.dash_to_dock_available():
+            raise RuntimeError("Dash-to-Dock settings are not available on this system.")
+        for key, value in settings.items():
+            run(["gsettings", "set", DASH_TO_DOCK_SCHEMA, key, normalize_gsettings_value(value)])
+
+    def save_dock_style_restore_point(self, previous_settings, active_action):
+        config = load_app_config()
+        existing = config.get("dockStyle")
+        original_settings = (
+            existing.get("originalSettings")
+            if isinstance(existing, dict) and isinstance(existing.get("originalSettings"), dict)
+            else previous_settings
+        )
+        config["dockStyle"] = {
+            "activeAction": active_action,
+            "originalSettings": original_settings,
+            "previousSettings": previous_settings,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        save_app_config(config)
+
+    def dock_style_restore_available(self):
+        state = load_app_config().get("dockStyle")
+        return isinstance(state, dict) and (
+            isinstance(state.get("originalSettings"), dict) or isinstance(state.get("previousSettings"), dict)
+        )
+
+    def clear_dock_style_active_action(self):
+        config = load_app_config()
+        state = config.get("dockStyle")
+        if not isinstance(state, dict):
+            return
+        state["activeAction"] = "restored"
+        config["dockStyle"] = state
+        save_app_config(config)
+
     def refresh_dock_layout_state(self):
         if not hasattr(self, "dock_layout_status_label"):
             return
         layout = self.dock_layout_label()
         restore_available = self.dock_layout_restore_available()
+        if hasattr(self, "dock_status_pills"):
+            schema_available = self.dash_to_dock_available()
+            self.set_pill(
+                self.dock_status_pills["schema"],
+                "available" if schema_available else "missing",
+                "ok" if schema_available else "err",
+            )
+            self.set_pill(
+                self.dock_status_pills["layout"],
+                layout,
+                "ok" if layout == "Windows taskbar" else ("err" if layout == "Unavailable" else "warn"),
+            )
+            self.set_pill(
+                self.dock_status_pills["restore"],
+                "saved" if restore_available else "none",
+                "ok" if restore_available else "warn",
+            )
         if layout == "Unavailable":
             self.dock_layout_status_label.set_text("Dock layout: unavailable. Dash-to-Dock settings were not found.")
             self.syncing_dock_layout = True
@@ -2750,6 +4194,7 @@ class App(Gtk.ApplicationWindow):
             self.dock_layout_switch.set_sensitive(False)
             self.dock_windows_button.set_sensitive(False)
             self.dock_restore_button.set_sensitive(False)
+            self.dock_restore_button.set_visible(False)
         else:
             self.dock_layout_status_label.set_text(
                 f"Dock layout: {layout}. Restore point: {'saved' if restore_available else 'none yet'}."
@@ -2760,6 +4205,7 @@ class App(Gtk.ApplicationWindow):
             self.dock_layout_switch.set_sensitive(True)
             self.dock_windows_button.set_sensitive(True)
             self.dock_restore_button.set_sensitive(restore_available)
+            self.dock_restore_button.set_visible(False)
         self.refresh_overview_summary()
 
     def refresh_current_style(self):
@@ -2772,6 +4218,16 @@ class App(Gtk.ApplicationWindow):
         else:
             self.style_description.set_text(f"Current dock click action: {current or 'unknown'}")
         self.syncing_style = False
+        if hasattr(self, "dock_status_pills"):
+            self.set_pill(
+                self.dock_status_pills["click"],
+                current or "unknown",
+                "ok" if current else "warn",
+            )
+        if hasattr(self, "style_restore_button"):
+            restore_available = self.dock_style_restore_available()
+            self.style_restore_button.set_sensitive(restore_available)
+            self.style_restore_button.set_visible(False)
         self.refresh_overview_summary()
 
     def describe_style(self, action):
@@ -2863,35 +4319,104 @@ class App(Gtk.ApplicationWindow):
         mark = buffer.create_mark(None, buffer.get_end_iter(), False)
         view.scroll_mark_onscreen(mark)
 
+    def on_aitools_field_changed(self, _entry):
+        if getattr(self, "syncing_aitools_fields", False):
+            return
+        self.update_aitools_mode_controls()
+        self.save_aitools_account_fields()
+        self.refresh_aitools_state()
+
+    def on_aitools_edit_target(self, _button, target):
+        self.open_aitools_target_dialog(target)
+
+    def on_aitools_open_bifrost_portal(self, _button):
+        try:
+            Gtk.show_uri_on_window(self, BIFROST_PORTAL_URL, Gdk.CURRENT_TIME)
+            self.log("Opened Bifrost token usage portal.")
+        except Exception:
+            try:
+                webbrowser.open(BIFROST_PORTAL_URL)
+                self.log("Opened Bifrost token usage portal.")
+            except Exception as error:
+                self.log(f"Failed to open Bifrost token usage portal: {error}")
+
     def on_aitools_install_commands(self, _button):
         try:
-            values = self.save_aitools_account_fields()
-            self.aitools_service.installTerminalCommands(values)
-            self.log("Installed terminal commands: biclaude and bicodex.")
+            values = self.aitools_config()
+            installed = self.aitools_service.installTerminalCommands(values)
+            self.log(f"Installed terminal commands: {', '.join(installed)}.")
         except Exception as error:
             self.log(f"Failed to install AI terminal commands: {error}")
         self.refresh_aitools_state()
 
+    def on_aitools_install_codex_command(self, _button):
+        try:
+            values = self.aitools_config()
+            self.aitools_service.installCodexCliCommand(values)
+            self.log("Installed Codex CLI Bifrost command: bicodex.")
+        except Exception as error:
+            self.log(f"Failed to install Codex CLI command: {error}")
+        self.refresh_aitools_state()
+
+    def on_aitools_install_claude_command(self, _button):
+        try:
+            values = self.aitools_config()
+            self.aitools_service.installClaudeCliCommand(values)
+            self.log("Installed Claude CLI Bifrost command: biclaude.")
+        except Exception as error:
+            self.log(f"Failed to install Claude CLI command: {error}")
+        self.refresh_aitools_state()
+
     def on_aitools_openai_login(self, _button):
         try:
+            self.save_aitools_account_fields()
             self.aitools_service.launchLogin("codex")
-            self.log("Opened OpenAI/Codex login in a terminal.")
+            self.log("Opened Codex web login for VS Code/global ~/.codex config.")
         except Exception as error:
             self.log(f"Failed to open OpenAI/Codex login: {error}")
         self.refresh_aitools_state()
 
     def on_aitools_claude_login(self, _button):
         try:
+            self.save_aitools_account_fields()
             self.aitools_service.launchLogin("claude")
-            self.log("Opened Claude web login in a terminal.")
+            self.log("Opened Claude web login for VS Code/global ~/.claude config.")
         except Exception as error:
             self.log(f"Failed to open Claude web login: {error}")
         self.refresh_aitools_state()
 
+    def on_aitools_install_codex(self, _button):
+        try:
+            self.aitools_service.setupCodexCli()
+            self.log("Started Codex CLI install in a terminal.")
+        except Exception as error:
+            self.log(f"Failed to start Codex CLI install: {error}")
+        self.refresh_aitools_state()
+
     def on_aitools_clear_bifrost(self, _button):
-        self.aitools_bifrost_token_entry.set_text("")
-        self.save_aitools_account_fields()
-        self.log("Saved Bifrost key cleared.")
+        config = load_app_config()
+        ai_tools = config.get("aiTools", {})
+        if isinstance(ai_tools, dict):
+            for target, _title, _tool, _path in AITOOLS_TARGETS:
+                target_config = ai_tools.get(target)
+                if isinstance(target_config, dict):
+                    target_config["bifrostToken"] = ""
+            ai_tools["bifrostToken"] = ""
+            config["aiTools"] = ai_tools
+            save_app_config(config)
+        self.log("Saved CLI Bifrost keys cleared.")
+        self.refresh_aitools_state()
+
+    def on_aitools_restore_original(self, _button):
+        try:
+            config = load_app_config()
+            ai_tools = config.get("aiTools", {}) if isinstance(config.get("aiTools"), dict) else {}
+            self.aitools_service.restoreOriginal(ai_tools)
+            config.pop("aiTools", None)
+            save_app_config(config)
+            self.log("Original AI tool setup restored. Personal web logins were left untouched.")
+        except Exception as error:
+            self.log(f"Failed to restore original AI tool setup: {error}")
         self.refresh_aitools_state()
 
     def on_vietnamese_check(self, _button):
@@ -2998,9 +4523,9 @@ class App(Gtk.ApplicationWindow):
     def on_vietnamese_restore(self, _button):
         try:
             self.vietnamese_service.restore_previous_settings()
-            self.log("Previous Vietnamese input settings restored.")
+            self.log("Original Vietnamese input settings restored.")
         except Exception as error:
-            self.log(f"Failed to restore Vietnamese input settings: {error}")
+            self.log(f"Failed to restore original Vietnamese input settings: {error}")
         self.refresh_vietnamese_input_state()
 
     def refresh_vietnamese_log_view(self):
@@ -3047,6 +4572,22 @@ class App(Gtk.ApplicationWindow):
             self.refresh_feature_state()
         except Exception as error:
             self.log(f"Failed to install hover previews: {error}")
+
+    def on_chrome_restore_original(self, _button):
+        errors = []
+        try:
+            self.disable_profile_launchers()
+        except Exception as error:
+            errors.append(f"profile launchers: {error}")
+        try:
+            self.disable_hover_extension()
+        except Exception as error:
+            errors.append(f"hover previews: {error}")
+        if errors:
+            self.log("Chrome restore finished with issues: " + "; ".join(errors))
+        else:
+            self.log("Original Chrome dock setup restored.")
+        self.refresh_feature_state()
 
     def on_profile_feature_toggled(self, _switch, state):
         if self.syncing_features:
@@ -3119,6 +4660,24 @@ class App(Gtk.ApplicationWindow):
             self.log(f"Failed to update Super+V shortcut: {error}")
             self.refresh_feature_state()
 
+    def on_clipboard_master_toggled(self, switch, state):
+        if self.syncing_features:
+            return False
+        try:
+            if state:
+                self.enable_copyq_clipboard()
+                self.log("Clipboard history enabled.")
+            else:
+                self.disable_copyq_clipboard()
+                self.log("Clipboard history restored to original setup.")
+            switch.set_state(state)
+            self.refresh_feature_state()
+        except Exception as error:
+            self.log(f"Failed to update clipboard history: {error}")
+            switch.set_state(not state)
+            self.refresh_feature_state()
+        return True
+
     def on_clipboard_clear(self, _button):
         try:
             self.clear_clipboard()
@@ -3141,6 +4700,14 @@ class App(Gtk.ApplicationWindow):
             self.log("Clipboard repaired. CopyQ scripts, autostart, and Super+V were recreated.")
         except Exception as error:
             self.log(f"Failed to repair clipboard: {error}")
+        self.refresh_feature_state()
+
+    def on_clipboard_restore_original(self, _button):
+        try:
+            self.disable_copyq_clipboard(quiet=True)
+            self.log("Original clipboard shortcuts and startup restored.")
+        except Exception as error:
+            self.log(f"Failed to restore original clipboard setup: {error}")
         self.refresh_feature_state()
 
     def ensure_startup_features_once(self):
@@ -3405,10 +4972,10 @@ class App(Gtk.ApplicationWindow):
 
     def on_mouse_restore(self, _button):
         try:
-            self.mouse_service.restorePreviousMaccelState()
-            self.log("Previous mouse settings restored")
+            self.mouse_service.restoreOriginalMaccelState()
+            self.log("Original mouse settings restored")
         except Exception as error:
-            self.log(f"Failed to restore previous mouse settings: {error}")
+            self.log(f"Failed to restore original mouse settings: {error}")
         self.refresh_mouse_movement_state()
 
     def on_dock_windows_taskbar(self, _button):
@@ -3444,13 +5011,16 @@ class App(Gtk.ApplicationWindow):
     def on_dock_restore_layout(self, _button):
         try:
             state = load_app_config().get("dockLayout")
-            if not isinstance(state, dict) or not isinstance(state.get("previousSettings"), dict):
-                raise RuntimeError("No previous dock layout restore point was found.")
-            self.apply_dock_layout_settings(state["previousSettings"])
+            if not isinstance(state, dict):
+                raise RuntimeError("No original dock layout restore point was found.")
+            settings = state.get("originalSettings") if isinstance(state.get("originalSettings"), dict) else state.get("previousSettings")
+            if not isinstance(settings, dict):
+                raise RuntimeError("No original dock layout restore point was found.")
+            self.apply_dock_layout_settings(settings)
             self.clear_dock_layout_active_preset()
-            self.log("Previous dock layout restored.")
+            self.log("Original dock layout restored.")
         except Exception as error:
-            self.log(f"Failed to restore previous dock layout: {error}")
+            self.log(f"Failed to restore original dock layout: {error}")
         self.refresh_dock_layout_state()
 
     def on_style_toggled(self, button, action):
@@ -3459,6 +5029,7 @@ class App(Gtk.ApplicationWindow):
         if not button.get_active():
             return
         try:
+            self.save_dock_style_restore_point(self.read_dock_style_settings(), action)
             run(["gsettings", "set", DASH_TO_DOCK_SCHEMA, "click-action", action])
             run(["gsettings", "set", DASH_TO_DOCK_SCHEMA, "middle-click-action", "previews"])
             run(["gsettings", "set", DASH_TO_DOCK_SCHEMA, "activate-single-window", "true"])
@@ -3466,6 +5037,22 @@ class App(Gtk.ApplicationWindow):
             self.log(f"Dock click style set to {action}.")
         except Exception as error:
             self.log(f"Failed to set style: {error}")
+        self.refresh_current_style()
+
+    def on_dock_restore_style(self, _button):
+        try:
+            state = load_app_config().get("dockStyle")
+            if not isinstance(state, dict):
+                raise RuntimeError("No original dock click style restore point was found.")
+            settings = state.get("originalSettings") if isinstance(state.get("originalSettings"), dict) else state.get("previousSettings")
+            if not isinstance(settings, dict):
+                raise RuntimeError("No original dock click style restore point was found.")
+            self.apply_dock_style_settings(settings)
+            self.clear_dock_style_active_action()
+            self.log("Original dock click style restored.")
+        except Exception as error:
+            self.log(f"Failed to restore original dock click style: {error}")
+        self.refresh_current_style()
 
     def install_profile_launchers(self):
         config_dir, browser_id = detect_chrome_config()
@@ -3616,9 +5203,8 @@ class App(Gtk.ApplicationWindow):
         )
         COPYQ_AUTOSTART.chmod(0o644)
         if not self._copyq_running():
-            subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        run(["copyq", "config", "item_popup_interval", "0"], check=False)
-        run(["copyq", "config", "native_notifications", "false"], check=False)
+            self._start_copyq()
+        self._configure_copyq()
         self.save_clipboard_config(autostart=True)
         if not quiet:
             self.refresh_clipboard_state()
@@ -3645,7 +5231,8 @@ class App(Gtk.ApplicationWindow):
             CLIPBOARD_SHORTCUT_BINDING,
         )
         if not self._copyq_running():
-            subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            self._start_copyq()
+        self._configure_copyq()
         self.save_clipboard_config(shortcut=True)
         if not quiet:
             self.refresh_clipboard_state()
@@ -3662,11 +5249,36 @@ class App(Gtk.ApplicationWindow):
             raise RuntimeError("CopyQ is not installed.")
         self._write_copyq_scripts()
         if not self._copyq_running():
-            subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            self._start_copyq()
         run([str(COPYQ_CLEAR)], check=False)
 
+    def _copyq_session_name(self):
+        source = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY") or "default"
+        safe = "".join(char if char.isalnum() or char in "-_" else "_" for char in source)
+        return f"ltb-{safe}"[:16]
+
+    def _copyq_command(self, *args):
+        return ["copyq", "--session", self._copyq_session_name(), *args]
+
+    def _start_copyq(self):
+        subprocess.Popen(self._copyq_command(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def _configure_copyq(self):
+        settings = {
+            "item_popup_interval": "0",
+            "native_notifications": "false",
+            "clipboard_notification_lines": "0",
+            "close_on_unfocus": "true",
+            "hide_main_window": "true",
+            "open_windows_on_current_screen": "true",
+        }
+        for key, value in settings.items():
+            run(self._copyq_command("config", key, value), check=False)
+
     def _copyq_running(self):
-        return run(["pgrep", "-x", "copyq"], check=False).strip() != ""
+        if not shutil.which("copyq"):
+            return False
+        return run(self._copyq_command("count"), check=False).strip() != ""
 
     def enable_copyq_clipboard(self, allow_install=True, quiet=False):
         # Composite: turn on both parts (used by Repair and startup self-heal).
@@ -3682,7 +5294,7 @@ class App(Gtk.ApplicationWindow):
         COPYQ_SHORTCUT.unlink(missing_ok=True)
         COPYQ_CLEAR.unlink(missing_ok=True)
         if shutil.which("copyq"):
-            run(["copyq", "exit"], check=False)
+            run(self._copyq_command("exit"), check=False)
         if not quiet:
             self.refresh_clipboard_state()
 

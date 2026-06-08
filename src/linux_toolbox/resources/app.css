@@ -1,20 +1,25 @@
-
 .app-shell {
-    background-color: @theme_bg_color;
+    background-color: #f3f5f8;
 }
 
 .sidebar {
-    background-color: shade(@theme_bg_color, 0.96);
-    border-right: 1px solid @borders;
+    background-color: #151922;
+    border-right: 1px solid #252b36;
 }
 
 .nav-row {
     padding: 0;
     border-radius: 0;
+    color: #c8d0dc;
+}
+
+.nav-row:hover {
+    background-color: #202633;
+    color: #ffffff;
 }
 
 .nav-row-box {
-    padding: 10px 12px 10px 0;
+    padding: 8px 12px 8px 0;
 }
 
 .nav-accent {
@@ -24,12 +29,12 @@
 }
 
 .nav-row:selected {
-    background-color: @theme_selected_bg_color;
-    color: @theme_selected_fg_color;
+    background-color: #263244;
+    color: #ffffff;
 }
 
 .nav-row:selected .nav-accent {
-    background-color: @theme_selected_fg_color;
+    background-color: #3b82f6;
 }
 
 .nav-label {
@@ -37,40 +42,210 @@
 }
 
 .content-page {
-    background-color: @theme_base_color;
+    background-color: #f3f5f8;
 }
 
 .card {
-    background-color: @theme_bg_color;
-    border: 1px solid @borders;
-    border-radius: 12px;
-    padding: 16px;
+    background-color: #ffffff;
+    border: 1px solid #d9e0ea;
+    border-radius: 8px;
+    padding: 10px;
+    box-shadow: 0 1px 2px alpha(#0f172a, 0.07);
 }
 
 .section-title {
-    font-size: 18px;
+    color: #172033;
+    font-size: 15px;
     font-weight: 700;
 }
 
 .section-subtitle {
-    opacity: 0.78;
+    color: #667085;
+    opacity: 1;
+}
+
+headerbar.app-header {
+    background-image: none;
+    background-color: #ffffff;
+    border-bottom: 1px solid #d9e0ea;
+    color: #172033;
+}
+
+.page-title {
+    color: #101828;
+    font-size: 19px;
+    font-weight: 700;
+    padding-bottom: 2px;
+}
+
+.page-description {
+    color: #5b6678;
+    font-size: 13px;
 }
 
 .pill {
     border-radius: 999px;
-    padding: 4px 10px;
+    padding: 2px 8px;
+    font-size: 12px;
     font-weight: 700;
-    color: #ffffff;
+    min-height: 18px;
+    border: 1px solid transparent;
 }
 
 .pill-ok {
-    background-color: #2ec27e;
+    background-color: #dcfce7;
+    border-color: #a7f3d0;
+    color: #047857;
 }
 
 .pill-warn {
-    background-color: #e5a50a;
+    background-color: #fff7d6;
+    border-color: #fde68a;
+    color: #9a5b00;
 }
 
 .pill-err {
-    background-color: #e01b24;
+    background-color: #fee2e2;
+    border-color: #fecaca;
+    color: #b42318;
+}
+
+.data-grid {
+    background-color: #ffffff;
+}
+
+.table-header {
+    color: #344054;
+    font-size: 12px;
+    font-weight: 700;
+    padding-top: 2px;
+    padding-bottom: 4px;
+}
+
+.table-cell {
+    color: #293548;
+    padding-top: 2px;
+    padding-bottom: 2px;
+}
+
+.content-page button,
+button.header-button {
+    background-image: none;
+    background-color: #ffffff;
+    border: 1px solid #cfd7e3;
+    border-radius: 6px;
+    color: #172033;
+    padding: 5px 10px;
+    box-shadow: 0 1px 1px alpha(#0f172a, 0.05);
+}
+
+.content-page button:hover,
+button.header-button:hover {
+    background-color: #f8fafc;
+    border-color: #b8c3d2;
+    color: #101828;
+}
+
+.content-page button:active,
+button.header-button:active {
+    background-color: #eef2f7;
+    box-shadow: none;
+}
+
+.content-page button:disabled,
+button.header-button:disabled {
+    background-color: #f1f4f8;
+    border-color: #d9e0ea;
+    color: #98a2b3;
+    box-shadow: none;
+}
+
+.content-page button.suggested-action {
+    background-image: none;
+    background-color: #2563eb;
+    border-color: #1d4ed8;
+    color: #ffffff;
+}
+
+.content-page button.suggested-action:hover {
+    background-color: #1d4ed8;
+    border-color: #1e40af;
+}
+
+.content-page button.suggested-action:active {
+    background-color: #1e40af;
+    border-color: #1e3a8a;
+}
+
+.content-page button.suggested-action:disabled {
+    background-color: #c7d2fe;
+    border-color: #c7d2fe;
+    color: #f8fafc;
+}
+
+.content-page button.secondary-action {
+    background-image: none;
+    background-color: #ffffff;
+    border-color: #cfd7e3;
+    color: #2563eb;
+}
+
+.content-page button.secondary-action:hover {
+    background-color: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
+}
+
+button.header-button {
+    background-image: none;
+    background-color: #f8fafc;
+    border-color: #cfd7e3;
+    color: #172033;
+}
+
+entry,
+combobox button,
+spinbutton {
+    background-color: #ffffff;
+    border-color: #cfd7e3;
+    color: #172033;
+}
+
+entry:focus,
+combobox button:focus,
+spinbutton:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px alpha(#3b82f6, 0.18);
+}
+
+textview,
+textview text {
+    background-color: #0f172a;
+    color: #dbe4f0;
+}
+
+scrolledwindow {
+    border-color: #d9e0ea;
+    border-radius: 6px;
+}
+
+switch {
+    background-color: #cfd7e3;
+    border-color: #b8c3d2;
+}
+
+switch:checked {
+    background-color: #2563eb;
+    border-color: #1d4ed8;
+}
+
+checkbutton check {
+    border-color: #b8c3d2;
+    background-color: #ffffff;
+}
+
+checkbutton check:checked {
+    background-color: #2563eb;
+    border-color: #1d4ed8;
+    color: #ffffff;
 }
