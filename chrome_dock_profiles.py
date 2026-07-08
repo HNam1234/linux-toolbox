@@ -26,7 +26,8 @@ HOME = Path.home()
 APP_DIR = HOME / ".local/share/applications"
 BIN_DIR = HOME / ".local/bin"
 ICON_DIR = HOME / ".local/share/icons/hicolor/256x256/apps"
-EXT_DIR = HOME / ".local/share/gnome-shell/extensions/dock-window-preview@quivio"
+HOVER_EXTENSION_UUID = "dock-window-preview@quivio"
+EXT_DIR = HOME / ".local/share/gnome-shell/extensions" / HOVER_EXTENSION_UUID
 AUTOSTART_DIR = HOME / ".config/autostart"
 SYSTEMD_USER_DIR = HOME / ".config/systemd/user"
 CHROME_CONFIG = HOME / ".config/google-chrome"
@@ -2278,7 +2279,7 @@ class App(Gtk.ApplicationWindow):
         try:
             self.install_hover_extension()
             self.log("Hover preview extension installed and enabled.")
-            self.log("Restart GNOME Shell to load it: Alt+F2, type r, press Enter. On Wayland, log out/in.")
+            self.log("If previews do not appear immediately, restart GNOME Shell: Alt+F2, type r, press Enter. On Wayland, log out/in.")
             self.refresh_feature_state()
         except Exception as error:
             self.log(f"Failed to install hover previews: {error}")
@@ -2324,7 +2325,7 @@ class App(Gtk.ApplicationWindow):
         try:
             if state:
                 self.install_hover_extension()
-                self.log("Hover previews enabled. Restart GNOME Shell or log out/in to load them.")
+                self.log("Hover previews enabled. If they do not appear immediately, restart GNOME Shell or log out/in.")
             else:
                 self.disable_hover_extension()
                 self.log("Hover previews disabled. Restart GNOME Shell or log out/in to unload them.")
@@ -2844,32 +2845,72 @@ class App(Gtk.ApplicationWindow):
     def desktop_id_for_profile(self, profile):
         return f"google-chrome-profile-{profile_slug(profile['directory'])}.desktop"
 
+    def gnome_shell_major_version(self):
+        output = run(["gnome-shell", "--version"], check=False)
+        for token in output.replace("-", " ").split():
+            major = token.split(".", 1)[0]
+            if major.isdigit():
+                return int(major)
+        return 0
+
+    def hover_extension_bundle(self):
+        major = self.gnome_shell_major_version()
+        if major >= 45:
+            return "hover-extension/extension-45.js", [str(major)]
+        return "hover-extension/extension-legacy.js", ["42", "43", "44"]
+
+    def hover_extension_metadata(self, shell_versions):
+        version = 1
+        for item in shell_versions:
+            try:
+                version = max(version, int(item))
+            except ValueError:
+                pass
+        return json.dumps(
+            {
+                "uuid": HOVER_EXTENSION_UUID,
+                "name": "Dock Window Preview",
+                "description": "Preview open windows by hovering a dock icon and activate a window by selecting the preview.",
+                "shell-version": shell_versions,
+                "version": version,
+            },
+            indent=2,
+        ) + "\n"
+
+    def set_hover_extension_enabled(self, enabled):
+        current = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False))
+        filtered = [item for item in current if item != HOVER_EXTENSION_UUID]
+        if enabled:
+            filtered.append(HOVER_EXTENSION_UUID)
+        run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", format_gsettings_list(filtered)])
+
+    def reload_hover_extension(self):
+        if shutil.which("gnome-extensions") is None:
+            return
+        run(["gnome-extensions", "disable", HOVER_EXTENSION_UUID], check=False)
+        run(["gnome-extensions", "enable", HOVER_EXTENSION_UUID], check=False)
+
     def install_hover_extension(self):
+        extension_resource, shell_versions = self.hover_extension_bundle()
         EXT_DIR.mkdir(parents=True, exist_ok=True)
-        (EXT_DIR / "metadata.json").write_text(load_text("hover-extension/metadata.json"), encoding="utf-8")
-        (EXT_DIR / "extension.js").write_text(load_text("hover-extension/extension.js"), encoding="utf-8")
+        (EXT_DIR / "metadata.json").write_text(self.hover_extension_metadata(shell_versions), encoding="utf-8")
+        (EXT_DIR / "extension.js").write_text(load_text(extension_resource), encoding="utf-8")
+        (EXT_DIR / "extension-legacy.js").write_text(load_text("hover-extension/extension-legacy.js"), encoding="utf-8")
+        (EXT_DIR / "extension-45.js").write_text(load_text("hover-extension/extension-45.js"), encoding="utf-8")
         (EXT_DIR / "stylesheet.css").write_text(load_text("hover-extension/stylesheet.css"), encoding="utf-8")
 
-        raw = run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False)
-        enabled = []
-        if raw.startswith("["):
-            enabled = [part.strip().strip("'") for part in raw.strip("[]").split(",") if part.strip()]
-        if "dock-window-preview@quivio" not in enabled:
-            enabled.append("dock-window-preview@quivio")
-        value = "[" + ", ".join(f"'{item}'" for item in enabled) + "]"
-        run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", value])
+        run(["gsettings", "set", "org.gnome.shell", "disable-user-extensions", "false"], check=False)
+        self.set_hover_extension_enabled(True)
+        self.reload_hover_extension()
 
     def disable_hover_extension(self):
-        enabled = [
-            item
-            for item in parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False))
-            if item != "dock-window-preview@quivio"
-        ]
-        run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", format_gsettings_list(enabled)])
+        self.set_hover_extension_enabled(False)
+        if shutil.which("gnome-extensions"):
+            run(["gnome-extensions", "disable", HOVER_EXTENSION_UUID], check=False)
 
     def hover_feature_enabled(self):
         enabled = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False))
-        return "dock-window-preview@quivio" in enabled
+        return HOVER_EXTENSION_UUID in enabled
 
     def _write_copyq_scripts(self):
         BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -3091,7 +3132,8 @@ class App(Gtk.ApplicationWindow):
 
 class ChromeDockProfiles(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="local.linux_toolbox")
+        application_id = os.environ.get("LINUX_TOOLBOX_APP_ID", "local.linux_toolbox")
+        super().__init__(application_id=application_id)
         self.window = None
 
     def do_activate(self):

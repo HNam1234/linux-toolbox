@@ -47,6 +47,7 @@ xvfb-run -a --server-args='-screen 0 1280x900x24' bash -c '
   export XDG_DATA_HOME="$HOME/.local/share"
   export XDG_STATE_HOME="$HOME/.local/state"
   export GSETTINGS_BACKEND=memory
+  export LINUX_TOOLBOX_APP_ID=local.linux_toolbox.verify
   export PATH="'$verify_dir'/bin:$PATH"
   python3 chrome_dock_profiles.py
 '
@@ -55,8 +56,10 @@ xvfb-run -a --server-args='-screen 0 1280x900x24' bash -c '
 ## Driving the UI
 
 - The app starts on Overview.
+- Set `LINUX_TOOLBOX_APP_ID` to a unique value if a real Linux Toolbox instance is already running; otherwise GTK single-instance activation can make the Xvfb app exit immediately.
 - Use `xdotool key Down` after the first click/focus to move from Overview to Chrome Profiles. Direct coordinate clicks can be unreliable under Xvfb without a window manager.
 - To enable Chrome Profile Dock Icons on the Chrome Profiles page, a click near absolute/window-relative `(1050, 435)` toggled the first switch in a 1280x900 Xvfb screen.
+- To enable Hover Window Previews on the Chrome Profiles page, a click near absolute/window-relative `(1040, 465)` toggled the second switch in a 1280x900 Xvfb screen.
 - Capture screenshots from inside the X session with GDK if normal screenshot tools capture the host display.
 
 ## Evidence to capture

@@ -2,8 +2,10 @@
   "description": "Preview open windows by hovering a dock icon and activate a window by selecting the preview.",
   "name": "Dock Window Preview",
   "shell-version": [
-    "42"
+    "42",
+    "43",
+    "44"
   ],
   "uuid": "dock-window-preview@quivio",
-  "version": 42
+  "version": 44
 }

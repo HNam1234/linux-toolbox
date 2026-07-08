@@ -1,5 +1,9 @@
-const { Clutter, GLib, Pango, St } = imports.gi;
-const Main = imports.ui.main;
+import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
+import Pango from 'gi://Pango';
+import St from 'gi://St';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const HOVER_DELAY_MS = 220;
 const HIDE_DELAY_MS = 260;
@@ -395,21 +399,18 @@ class DockHoverTracker {
     }
 }
 
-let tracker = null;
+export default class DockWindowPreviewExtension extends Extension {
+    enable() {
+        if (this._tracker)
+            return;
+        this._tracker = new DockHoverTracker();
+        this._tracker.enable();
+    }
 
-function init() {
-}
-
-function enable() {
-    if (tracker)
-        return;
-    tracker = new DockHoverTracker();
-    tracker.enable();
-}
-
-function disable() {
-    if (!tracker)
-        return;
-    tracker.destroy();
-    tracker = null;
+    disable() {
+        if (!this._tracker)
+            return;
+        this._tracker.destroy();
+        this._tracker = null;
+    }
 }

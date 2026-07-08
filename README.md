@@ -51,9 +51,9 @@ The old `chrome-dock-profiles` command is still installed as a compatibility ali
   - Minimize + Previews
   - Preview Picker
   - Cycle Windows
-- Installs a local GNOME 42 hover-preview extension.
+- Installs a local hover-preview extension for GNOME 42-44 and GNOME 45+ shells.
 
-After installing hover previews, restart GNOME Shell:
+After installing hover previews, Linux Toolbox asks GNOME Shell to reload the extension when possible. If previews do not appear immediately, restart GNOME Shell:
 
 ```text
 Alt+F2, type r, press Enter
@@ -110,4 +110,4 @@ Install logs are written to:
 
 - Best support: Ubuntu GNOME on X11.
 - Wayland: dock settings and clipboard history should work. Chrome profile window grouping is forced through Chrome's X11 backend when launched from generated profile icons for better GNOME dock separation.
-- Hover previews currently target GNOME 42.
+- Hover previews install a legacy extension on GNOME 42-44 and a module-based extension on GNOME 45+.
