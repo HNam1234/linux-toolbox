@@ -9,14 +9,18 @@ profile_dir=$1
 wm_class=$2
 shift 2
 
-chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
+chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)
+if [ -z "${chrome:-}" ]; then
+  echo "Chrome/Chromium executable was not found." >&2
+  exit 127
+fi
 
 before_ids=""
 if command -v xdotool >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
   before_ids=$(xdotool search --onlyvisible . 2>/dev/null | sort -u || true)
 fi
 
-"$chrome" --profile-directory="$profile_dir" --class="$wm_class" "$@" &
+"$chrome" --ozone-platform=x11 --profile-directory="$profile_dir" --class="$wm_class" "$@" &
 
 if ! command -v xdotool >/dev/null 2>&1 || [ -z "${DISPLAY:-}" ]; then
   exit 0
@@ -66,3 +70,5 @@ while [ "$i" -lt 150 ]; do
   sleep 0.1
   i=$((i + 1))
 done
+
+exit 0
