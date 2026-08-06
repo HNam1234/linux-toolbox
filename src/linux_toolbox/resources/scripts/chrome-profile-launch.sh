@@ -38,20 +38,8 @@ $1
 }
 
 is_chrome_window() {
-  pid=$(xdotool getwindowpid "$1" 2>/dev/null || true)
-  [ -n "${pid:-}" ] || return 1
-
-  exe=""
-  if [ -e "/proc/$pid/exe" ]; then
-    exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
-  fi
-
-  cmdline=""
-  if [ -r "/proc/$pid/cmdline" ]; then
-    cmdline=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
-  fi
-
-  case "$exe $cmdline" in
+  class=$(xdotool getwindowclassname "$1" 2>/dev/null || true)
+  case "${class,,}" in
     *google-chrome*|*chrome*|*chromium*) return 0 ;;
     *) return 1 ;;
   esac
