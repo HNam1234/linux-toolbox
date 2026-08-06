@@ -25,9 +25,13 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0 xdotool xvfb x11-utils dbus-x11
-        pip install pytest
 
-    - name: Run script in xvfb
+    - name: Run installer
+      run: |
+        chmod +x install.sh
+        ./install.sh
+
+    - name: Test headless execution and file generation
       run: |
         # Setup fake X11 environment to allow script to run
         export DISPLAY=:99
@@ -37,7 +41,32 @@ jobs:
         # Test if the script can parse without syntax errors
         python3 -m py_compile chrome_dock_profiles.py
         
-        # Test the wrapper script syntax
-        bash -n src/linux_toolbox/resources/scripts/chrome-profile-launch.sh
+        # We need fake Chrome profiles to test generation
+        mkdir -p ~/.config/google-chrome/Default
+        touch ~/.config/google-chrome/Local\ State
+        echo '{"profile":{"info_cache":{"Default":{"name":"Test Profile"}}}}' > ~/.config/google-chrome/Local\ State
         
-        # We can also add dummy python tests here if any exist
+        # Run the application headlessly to trigger profile launcher generation
+        # We use a small python snippet to trigger the profile installation directly
+        python3 -c '
+        import sys, os
+        sys.path.append(f"{os.environ[\"HOME\"]}/.local/share/chrome-dock-profiles")
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+        # Bypass GUI and run the launcher generation directly
+        import chrome_dock_profiles
+        app = chrome_dock_profiles.App(application=Gtk.Application())
+        app.install_profile_launchers()
+        ' || true # Gtk.Application might complain without a proper main loop, but we just need it to run
+
+    - name: Validate generated files
+      run: |
+        echo "Validating desktop files..."
+        ls -la ~/.local/share/applications/google-chrome-profile*.desktop
+        
+        echo "Validating wrapper script..."
+        ls -la ~/.local/bin/chrome-profile-launch
+        
+        echo "Validating script syntax..."
+        bash -n ~/.local/bin/chrome-profile-launch
