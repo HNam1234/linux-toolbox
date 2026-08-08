@@ -21,6 +21,7 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gtk, GLib, Gdk, Gio  # noqa: E402
 
 from linux_toolbox.resources import load_template, load_text  # noqa: E402
+from linux_toolbox.cockpit_tools import CockpitToolsService  # noqa: E402
 
 
 HOME = Path.home()
@@ -920,8 +921,11 @@ class App(Gtk.ApplicationWindow):
         self.syncing_extensions = False
         self.extension_modules = {}
         self.mouse_service = MouseMovementService()
+        self.cockpit_service = CockpitToolsService()
         self.mouse_install_process = None
         self.mouse_install_timer_id = None
+        self.cockpit_install_process = None
+        self.cockpit_install_timer_id = None
         self.mouse_permission_fix_process = None
         self.mouse_permission_pending = None
 
@@ -963,6 +967,7 @@ class App(Gtk.ApplicationWindow):
         chrome_scroller, chrome_tab = self.create_tab_page()
         mouse_scroller, mouse_tab = self.create_tab_page()
         clipboard_scroller, clipboard_tab = self.create_tab_page()
+        cockpit_scroller, cockpit_tab = self.create_tab_page()
         arcmenu_scroller, arcmenu_tab = self.create_tab_page()
         bluetooth_scroller, bluetooth_tab = self.create_tab_page()
         dash_panel_scroller, dash_panel_tab = self.create_tab_page()
@@ -971,6 +976,7 @@ class App(Gtk.ApplicationWindow):
         self.stack.add_titled(chrome_scroller, "chrome", "Chrome Profiles")
         self.stack.add_titled(mouse_scroller, "mouse", "Mouse")
         self.stack.add_titled(clipboard_scroller, "clipboard", "Clipboard")
+        self.stack.add_titled(cockpit_scroller, "cockpit", "Cockpit Fork")
         self.stack.add_titled(arcmenu_scroller, "arcmenu", "ArcMenu")
         self.stack.add_titled(bluetooth_scroller, "bluetooth", "Bluetooth Battery")
         self.stack.add_titled(dash_panel_scroller, "dash-panel", "Dash to Panel")
@@ -980,6 +986,7 @@ class App(Gtk.ApplicationWindow):
             ("chrome", "Chrome Profiles", "web-browser-symbolic"),
             ("mouse", "Mouse", "input-mouse-symbolic"),
             ("clipboard", "Clipboard", "edit-paste-symbolic"),
+            ("cockpit", "Cockpit Fork", "applications-system-symbolic"),
             ("arcmenu", "ArcMenu", "view-app-grid-symbolic"),
             ("bluetooth", "Bluetooth Battery", "bluetooth-active-symbolic"),
             ("dash-panel", "Dash to Panel", "view-list-symbolic"),
@@ -1373,10 +1380,113 @@ class App(Gtk.ApplicationWindow):
         self.clipboard_status_label.get_style_context().add_class("section-subtitle")
         clipboard_setup_card.pack_start(self.clipboard_status_label, False, False, 0)
 
+        cockpit_intro = Gtk.Label()
+        cockpit_intro.set_markup("<span size='large'><b>Cockpit Tools (Codex Fork)</b></span>")
+        cockpit_intro.set_xalign(0)
+        cockpit_intro.set_line_wrap(True)
+        cockpit_intro.get_style_context().add_class("page-title")
+        cockpit_tab.pack_start(cockpit_intro, False, False, 0)
+
+        cockpit_description = Gtk.Label(
+            label=(
+                "Build the upstream Cockpit Tools source with the Codex patch, then install it; "
+                "reapply the patch after an official update if needed."
+            )
+        )
+        cockpit_description.set_xalign(0)
+        cockpit_description.set_line_wrap(True)
+        cockpit_description.get_style_context().add_class("page-description")
+        cockpit_tab.pack_start(cockpit_description, False, False, 0)
+
+        cockpit_status_card = self.create_card(
+            "Status Check",
+            "Linux Toolbox tracks the fork it installed without relying on the shared Debian package name.",
+        )
+        cockpit_tab.pack_start(cockpit_status_card, False, False, 0)
+        self.cockpit_status_pills = self.create_status_table(
+            cockpit_status_card,
+            (
+                ("package", "Debian package"),
+                ("source", "Installed source"),
+                ("version", "Package version"),
+                ("process", "Running process"),
+            ),
+        )
+
+        cockpit_setup_card = self.create_card(
+            "Setup Flow",
+            "The installer builds and validates a patched .deb locally before changing the installed package.",
+        )
+        cockpit_tab.pack_start(cockpit_setup_card, False, False, 0)
+
+        cockpit_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        cockpit_setup_card.pack_start(cockpit_actions, False, False, 0)
+
+        self.cockpit_install_button = self.create_primary_button(
+            "Install / Reapply Fork Patch",
+            "Build upstream Cockpit Tools with the Codex patch, then install the validated .deb.",
+        )
+        self.cockpit_install_button.set_no_show_all(False)
+        self.cockpit_install_button.connect("clicked", self.on_cockpit_install)
+        cockpit_actions.pack_start(self.cockpit_install_button, True, True, 0)
+
+        self.cockpit_uninstall_button = Gtk.Button(label="Remove Managed Fork")
+        self.cockpit_uninstall_button.set_tooltip_text(
+            "Remove only a Cockpit Tools fork installed and marked by Linux Toolbox; keep account data."
+        )
+        self.cockpit_uninstall_button.get_style_context().add_class("secondary-action")
+        self.cockpit_uninstall_button.connect("clicked", self.on_cockpit_uninstall)
+        cockpit_actions.pack_start(self.cockpit_uninstall_button, True, True, 0)
+
+        self.cockpit_status_label = Gtk.Label()
+        self.cockpit_status_label.set_xalign(0)
+        self.cockpit_status_label.set_line_wrap(True)
+        self.cockpit_status_label.get_style_context().add_class("section-subtitle")
+        cockpit_setup_card.pack_start(self.cockpit_status_label, False, False, 0)
+
+        self.cockpit_install_progress = Gtk.ProgressBar()
+        self.cockpit_install_progress.set_no_show_all(True)
+        cockpit_setup_card.pack_start(self.cockpit_install_progress, False, False, 0)
+
+        cockpit_log_label = Gtk.Label()
+        cockpit_log_label.set_markup("<b>Fork Installer Log</b>")
+        cockpit_log_label.set_xalign(0)
+        cockpit_log_label.set_no_show_all(True)
+        cockpit_log_label.hide()
+        self.cockpit_log_label = cockpit_log_label
+        cockpit_setup_card.pack_start(cockpit_log_label, False, False, 0)
+
+        self.cockpit_install_log_view = Gtk.TextView()
+        self.cockpit_install_log_view.set_editable(False)
+        self.cockpit_install_log_view.set_cursor_visible(False)
+        self.cockpit_install_log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.cockpit_install_log_view.set_monospace(True)
+        cockpit_log_scroller = Gtk.ScrolledWindow()
+        cockpit_log_scroller.set_min_content_height(96)
+        cockpit_log_scroller.set_no_show_all(True)
+        cockpit_log_scroller.hide()
+        cockpit_log_scroller.add(self.cockpit_install_log_view)
+        self.cockpit_log_scroller = cockpit_log_scroller
+        cockpit_setup_card.pack_start(cockpit_log_scroller, True, True, 0)
+
+        cockpit_safety_card = self.create_card("Data Safety", "What replacement does and does not change.")
+        cockpit_tab.pack_start(cockpit_safety_card, False, False, 0)
+        cockpit_safety_label = Gtk.Label(
+            label=(
+                "The replacement removes only the system package and keeps Cockpit account/config data. "
+                "Linux Toolbox applies the local patch and validates the new .deb before touching an existing installation. "
+                "If Cockpit is open, close it first or confirm the installer may request a clean shutdown."
+            )
+        )
+        cockpit_safety_label.set_xalign(0)
+        cockpit_safety_label.set_line_wrap(True)
+        cockpit_safety_card.pack_start(cockpit_safety_label, False, False, 0)
+
         self.refresh_compatibility()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_cockpit_state()
         self.refresh_extension_modules()
         self.refresh_overview_summary()
         self.stack.set_visible_child_name("overview")
@@ -2018,6 +2128,20 @@ class App(Gtk.ApplicationWindow):
         except Exception:
             module_summary = "Unavailable"
             module_level = "warn"
+        try:
+            cockpit_status = self.cockpit_service.get_status()
+            if cockpit_status["managedFork"]:
+                cockpit_summary = "Cockpit: Codex fork"
+                cockpit_level = "ok"
+            elif cockpit_status["packageInstalled"]:
+                cockpit_summary = "Cockpit: Official / unknown"
+                cockpit_level = "warn"
+            else:
+                cockpit_summary = "Cockpit: Not installed"
+                cockpit_level = "warn"
+        except Exception:
+            cockpit_summary = "Cockpit: Unavailable"
+            cockpit_level = "warn"
 
         pills = [
             ("Chrome Profiles: On" if chrome_ready else "Chrome Profiles: Setup", "ok" if chrome_ready else "warn"),
@@ -2027,6 +2151,7 @@ class App(Gtk.ApplicationWindow):
             ),
             ("Clipboard: On" if clipboard_ready else "Clipboard: Off", "ok" if clipboard_ready else "warn"),
             (f"GNOME Extensions: {module_summary}", module_level),
+            (cockpit_summary, cockpit_level),
         ]
         for text, level in pills:
             self.overview_summary_box.add(self.make_pill(text, level))
@@ -2261,6 +2386,99 @@ class App(Gtk.ApplicationWindow):
             return False
         self.mouse_install_progress.pulse()
         self.refresh_mouse_movement_state()
+        return True
+
+    def refresh_cockpit_state(self):
+        if not hasattr(self, "cockpit_status_label"):
+            return
+
+        try:
+            status = self.cockpit_service.get_status()
+        except Exception as error:
+            self.cockpit_status_label.set_text(f"Could not read Cockpit Tools status: {error}")
+            return
+
+        install_running = self.cockpit_install_process is not None and self.cockpit_install_process.poll() is None
+        package_installed = status["packageInstalled"]
+        source = status["source"]
+        running = status["running"]
+
+        self.set_pill(
+            self.cockpit_status_pills["package"],
+            "installed" if package_installed else "missing",
+            "ok" if package_installed else "warn",
+        )
+        source_level = "ok" if status["managedFork"] else ("warn" if package_installed else "err")
+        self.set_pill(self.cockpit_status_pills["source"], source, source_level)
+        self.set_pill(
+            self.cockpit_status_pills["version"],
+            status["packageVersion"] or "unknown",
+            "ok" if package_installed else "warn",
+        )
+        process_text = "installer running" if install_running else ("running" if running else "stopped")
+        self.set_pill(
+            self.cockpit_status_pills["process"],
+            process_text,
+            "warn" if install_running or running else "ok",
+        )
+
+        self.cockpit_install_button.set_sensitive(status["supported"] and not install_running)
+        if status["managedFork"]:
+            install_label = "Rebuild / Update Fork"
+        elif package_installed:
+            install_label = "Reapply Fork Patch"
+        else:
+            install_label = "Install Fork"
+        self.cockpit_install_button.set_label(install_label)
+        self.cockpit_uninstall_button.set_visible(status["managedFork"])
+        self.cockpit_uninstall_button.set_sensitive(status["supported"] and not install_running)
+        self.cockpit_install_progress.set_visible(install_running)
+        if install_running:
+            self.cockpit_install_progress.set_show_text(True)
+            self.cockpit_install_progress.set_text("Working…")
+        else:
+            self.cockpit_install_progress.set_show_text(False)
+
+        lines = []
+        if not status["supported"]:
+            lines.append("This feature currently requires a Debian/Ubuntu-style Linux system with dpkg.")
+        elif install_running:
+            lines.append("The fork installer is running. Authentication dialogs may appear for package operations.")
+        elif status["managedFork"]:
+            lines.append("Linux Toolbox-managed Cockpit Tools Codex fork is installed.")
+        elif package_installed:
+            lines.append("An official or changed Cockpit Tools package is installed; Reapply Fork Patch will rebuild it from upstream source.")
+        else:
+            lines.append("Cockpit Tools is not installed. Install Fork will build the patched package from source.")
+        if running:
+            lines.append("Cockpit Tools is open. The installer will ask before requesting a clean shutdown.")
+        lines.append(f"Installer log: {status['installLogPath']}")
+        self.cockpit_status_label.set_text("\n".join(lines))
+        self.refresh_cockpit_install_log_view()
+        self.refresh_overview_summary()
+
+    def refresh_cockpit_install_log_view(self):
+        if not hasattr(self, "cockpit_install_log_view"):
+            return
+        text = self.cockpit_service.read_install_log()
+        install_running = self.cockpit_install_process is not None and self.cockpit_install_process.poll() is None
+        visible = bool(text) or install_running
+        self.cockpit_log_label.set_visible(visible)
+        self.cockpit_log_scroller.set_visible(visible)
+        buffer = self.cockpit_install_log_view.get_buffer()
+        current = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        if current == text:
+            return
+        buffer.set_text(text)
+        mark = buffer.create_mark(None, buffer.get_end_iter(), False)
+        self.cockpit_install_log_view.scroll_mark_onscreen(mark)
+
+    def pulse_cockpit_install_progress(self):
+        if self.cockpit_install_process is None or self.cockpit_install_process.poll() is not None:
+            self.cockpit_install_timer_id = None
+            return False
+        self.cockpit_install_progress.pulse()
+        self.refresh_cockpit_state()
         return True
 
     def dash_to_dock_available(self):
@@ -2530,6 +2748,7 @@ class App(Gtk.ApplicationWindow):
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_cockpit_state()
         self.refresh_extension_modules()
         self.refresh_overview_summary()
 
@@ -2717,6 +2936,7 @@ class App(Gtk.ApplicationWindow):
             self.log(f"Mouse Movement startup check failed: {error}")
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_cockpit_state()
         return False
 
     def on_mouse_windows(self, _button):
@@ -2935,6 +3155,146 @@ class App(Gtk.ApplicationWindow):
             self.log(f"Failed to install maccel backend: {error}")
             self.mouse_install_process = None
         self.refresh_mouse_movement_state()
+
+    def on_cockpit_install(self, _button):
+        if self.cockpit_install_process is not None and self.cockpit_install_process.poll() is None:
+            return
+        try:
+            status = self.cockpit_service.get_status()
+        except Exception as error:
+            self.log(f"Could not read Cockpit Tools status: {error}")
+            return
+        if not status["supported"]:
+            self.log("Cockpit fork installation requires a Debian/Ubuntu-style Linux system with dpkg.")
+            return
+
+        operation = "repair" if status["packageInstalled"] and not status["managedFork"] else "install"
+        stop_running = status["running"]
+        if status["packageInstalled"] or stop_running:
+            if not self.confirm_cockpit_operation(operation, status):
+                self.log("Cockpit fork installation cancelled.")
+                return
+        self.start_cockpit_action(operation, stop_running=stop_running)
+
+    def on_cockpit_uninstall(self, _button):
+        if self.cockpit_install_process is not None and self.cockpit_install_process.poll() is None:
+            return
+        try:
+            status = self.cockpit_service.get_status()
+        except Exception as error:
+            self.log(f"Could not read Cockpit Tools status: {error}")
+            return
+        if not status["managedFork"]:
+            self.log("Only a Linux Toolbox-managed Cockpit fork can be removed from this button.")
+            return
+        if not self.confirm_cockpit_operation("uninstall", status):
+            self.log("Cockpit fork removal cancelled.")
+            return
+        self.start_cockpit_action("uninstall", stop_running=status["running"])
+
+    def confirm_cockpit_operation(self, action, status):
+        if action in ("install", "repair"):
+            if status["managedFork"]:
+                title = "Rebuild Cockpit Tools fork?"
+                detail = (
+                    "Linux Toolbox will fetch the current upstream source, apply the Codex patch, "
+                    "remove the managed package, and install the new validated .deb. "
+                    "Account/config data will be kept."
+                )
+            elif action == "repair":
+                title = "Reapply Cockpit Tools patch?"
+                detail = (
+                    "An official or changed cockpit-tools package is installed. Linux Toolbox will "
+                    "fetch the installed version's upstream source, apply the Codex patch, build and validate it, "
+                    "then replace the package. Account/config data will be kept."
+                )
+            else:
+                title = "Install patched Cockpit Tools?"
+                detail = (
+                    "Linux Toolbox will build upstream Cockpit Tools with the Codex patch first, "
+                    "then install the validated package. Account/config data will be kept."
+                )
+        else:
+            title = "Remove managed Cockpit Tools fork?"
+            detail = (
+                "Linux Toolbox will remove only the managed Cockpit Tools package. "
+                "It will not purge account, session, or configuration data."
+            )
+        if status["running"]:
+            detail += "\n\nCockpit Tools is currently open; Continue will request a clean shutdown before the package operation."
+
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING if action in ("install", "repair") else Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=title,
+        )
+        dialog.format_secondary_text(detail)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        continue_button = dialog.add_button("Continue", Gtk.ResponseType.OK)
+        continue_button.get_style_context().add_class("suggested-action")
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.OK
+
+    def start_cockpit_action(self, action, stop_running=False):
+        try:
+            if action == "install":
+                self.log(
+                    "Building upstream Cockpit Tools with the Codex patch. "
+                    "The current package will not be changed until the build succeeds."
+                )
+            elif action == "repair":
+                self.log(
+                    "Reapplying the Codex patch after the current package update. "
+                    "The current package will not be changed until the build succeeds."
+                )
+            else:
+                self.log("Removing the Linux Toolbox-managed Cockpit Tools fork.")
+            if action == "install":
+                self.cockpit_install_process = self.cockpit_service.start_install(stop_running=stop_running)
+            elif action == "repair":
+                self.cockpit_install_process = self.cockpit_service.start_repair(stop_running=stop_running)
+            else:
+                self.cockpit_install_process = self.cockpit_service.start_uninstall(stop_running=stop_running)
+            GLib.child_watch_add(
+                self.cockpit_install_process.pid,
+                self.on_cockpit_action_finished,
+                action,
+            )
+            if self.cockpit_install_timer_id is None:
+                self.cockpit_install_timer_id = GLib.timeout_add(700, self.pulse_cockpit_install_progress)
+        except Exception as error:
+            self.log(f"Could not start Cockpit fork operation: {error}")
+            self.cockpit_install_process = None
+        self.refresh_cockpit_state()
+
+    def on_cockpit_action_finished(self, _pid, status, action):
+        exit_code = status >> 8
+        if self.cockpit_install_process is not None:
+            self.cockpit_install_process.wait()
+        self.cockpit_install_process = None
+        self.cockpit_install_timer_id = None
+
+        if exit_code == 0:
+            try:
+                current = self.cockpit_service.get_status()
+                if action in ("install", "repair") and current["managedFork"]:
+                    self.log("Cockpit Tools Codex fork installed. Account/config data was preserved.")
+                elif action == "uninstall" and not current["packageInstalled"]:
+                    self.log("Cockpit Tools Codex fork removed. Account/config data was preserved.")
+                else:
+                    self.log("Cockpit fork operation finished; refresh status to verify the package state.")
+            except Exception as error:
+                self.log(f"Cockpit fork operation finished, but status refresh failed: {error}")
+        else:
+            detail = self.cockpit_service.latest_install_log_line()
+            message = f"Cockpit fork {action} failed."
+            if detail:
+                message += f" Last log: {detail}"
+            self.log(message)
+        self.refresh_cockpit_state()
 
     def on_mouse_install_finished(self, _pid, status):
         exit_code = status >> 8

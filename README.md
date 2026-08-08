@@ -6,6 +6,7 @@ Set-and-forget Ubuntu GNOME utilities for a more Windows-like desktop workflow. 
 - A Windows-style horizontal dock preset for Ubuntu Dock, with restore back to the original layout.
 - `Super+V` clipboard history popup powered by CopyQ.
 - Simple Windows/macOS-like mouse movement presets powered by maccel.
+- Managed installer for the Cockpit Tools Codex fork.
 
 ## Install
 
@@ -34,6 +35,7 @@ The app gives you a guided tabbed GUI with:
 - Dedicated ArcMenu, Bluetooth Battery Meter, and Dash to Panel tabs with independent install, enable/disable, reset, and inline GSettings controls.
 - A Clipboard tab with CopyQ clipboard history toggle and `Super+V` binding.
 - A Mouse Movement tab with install status, maccel installer progress, Windows, macOS, and Restore Original buttons.
+- A Cockpit Fork tab that builds and installs `HNam1234/cockpit-tools-linux-codex`, replacing an official `cockpit-tools` package only after the fork `.deb` has been built and validated.
 
 The old `chrome-dock-profiles` command is still installed as a compatibility alias for existing users.
 
@@ -106,6 +108,45 @@ Install logs are written to:
 ```text
 ~/.config/chrome-dock-profiles/maccel-install.log
 ```
+
+## Cockpit Tools Codex Fork
+
+Linux Toolbox includes a managed installer for the Cockpit Tools Codex patch:
+
+<https://github.com/HNam1234/cockpit-tools-linux-codex>
+
+The fork currently does not publish Linux release assets, so the installer
+fetches the upstream source and applies a local patch before building the
+Debian package. It checks the package name and architecture, then removes an
+existing official/unknown `cockpit-tools` package and installs the validated
+patched build. A failed build leaves the existing installation untouched.
+
+The package is removed with `dpkg --remove`, never `purge`; Cockpit account,
+session, and configuration data are kept. Linux Toolbox records a small marker
+and binary hash under `~/.local/share/linux-toolbox/` so it can distinguish its
+managed fork from an official or manually installed package.
+
+The same installer is available from the command line after running the main
+installer:
+
+```bash
+linux-toolbox-install-cockpit-tools status
+linux-toolbox-install-cockpit-tools install --stop-running
+linux-toolbox-install-cockpit-tools repair --stop-running
+linux-toolbox-install-cockpit-tools uninstall --stop-running
+```
+
+If a later official update overwrites the patched package, use the **Reapply
+Fork Patch** button in the Cockpit tab or run the `repair` command. This does
+not require maintaining another fork: it reapplies the patch to the latest
+upstream source. If upstream moves or removes a patch target, the build fails
+before the installed package is changed.
+
+Building requires Node.js 18+, npm 9+, Rust/Cargo, Go, Git, and the Tauri Linux
+build libraries. Missing Ubuntu/Debian build packages are installed through
+`pkexec` during the build. The patched build is pointed at the fork's updater
+and remote-config URLs so it does not automatically replace itself with the
+official release channel.
 
 ## Compatibility
 

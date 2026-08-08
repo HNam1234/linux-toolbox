@@ -13,6 +13,10 @@ rm -rf "$app_dir/src"
 cp -a "$script_dir/src" "$app_dir/src"
 chmod +x "$app_dir/chrome_dock_profiles.py"
 
+cockpit_installer="$bin_dir/linux-toolbox-install-cockpit-tools"
+cp "$script_dir/src/linux_toolbox/resources/scripts/install-cockpit-tools-fork.sh" "$cockpit_installer"
+chmod +x "$cockpit_installer"
+
 write_launcher() {
   local target="$1"
   cat > "$target" <<EOF
@@ -35,7 +39,7 @@ cat > "$new_desktop_file" <<EOF
 [Desktop Entry]
 Version=1.0
 Name=Linux Toolbox
-Comment=Set-and-forget Ubuntu tools for Chrome profiles, dock, clipboard, and mouse movement
+Comment=Set-and-forget Ubuntu tools for Chrome profiles, dock, clipboard, mouse movement, and the Cockpit fork
 Exec=$bin_dir/linux-toolbox
 Terminal=false
 Type=Application
@@ -84,3 +88,4 @@ update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || tru
 echo "Installed. Open 'Linux Toolbox' from Applications, or run:"
 echo "$bin_dir/linux-toolbox"
 echo "Compatibility command kept: $bin_dir/chrome-dock-profiles"
+echo "Cockpit fork installer: $cockpit_installer"
