@@ -17,7 +17,8 @@ if SRC_DIR.exists():
     sys.path.insert(0, str(SRC_DIR))
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib, Gdk  # noqa: E402
+gi.require_version("Gio", "2.0")
+from gi.repository import Gtk, GLib, Gdk, Gio  # noqa: E402
 
 from linux_toolbox.resources import load_template, load_text  # noqa: E402
 
@@ -55,6 +56,11 @@ MOUSE_INSTALL_LOG = CONFIG_DIR / "maccel-install.log"
 MOUSE_PERMISSION_FIXER = BIN_DIR / "chrome-dock-profiles-fix-maccel-permission"
 SENS_MULT_PATH = Path("/sys/module/maccel/parameters/SENS_MULT")
 MACCEL_GROUP = "maccel"
+GNOME_EXTENSION_ROOTS = (
+    HOME / ".local/share/gnome-shell/extensions",
+    Path("/usr/local/share/gnome-shell/extensions"),
+    Path("/usr/share/gnome-shell/extensions"),
+)
 DASH_TO_DOCK_SCHEMA = "org.gnome.shell.extensions.dash-to-dock"
 DOCK_LAYOUT_KEYS = (
     "dock-position",
@@ -97,6 +103,75 @@ STYLE_ACTIONS = {
     "Preview Picker": ("previews", "Left-click opens window previews."),
     "Cycle Windows": ("cycle-windows", "Left-click cycles through app windows."),
 }
+
+
+# These are the extensions that make the desktop workflow useful for a
+# Windows-like setup. They are intentionally described as modules rather than
+# as a download list: each module has a lifecycle (installed/enabled) and a
+# small set of high-value settings that Linux Toolbox can edit directly.
+# The extension's complete preferences remain available through the fallback
+# "Open full preferences" action.
+EXTENSION_MODULES = (
+    {
+        "name": "ArcMenu",
+        "uuid": "arcmenu@arcmenu.com",
+        "description": "A familiar application menu with layouts, button, and panel placement controls.",
+        "schema": "org.gnome.shell.extensions.arcmenu",
+        "settings": (
+            "menu-layout",
+            "position-in-panel",
+            "menu-button-appearance",
+            "menu-button-text",
+            "menu-button-icon-size",
+            "default-menu-view",
+            "menu-position-alignment",
+            "show-user-avatar",
+            "show-bookmarks",
+            "multi-monitor",
+        ),
+    },
+    {
+        "name": "Bluetooth Battery Meter",
+        "uuid": "Bluetooth-Battery-Meter@maniacx.github.com",
+        "description": "Show battery levels for Bluetooth devices in the panel and quick settings.",
+        "schema": "org.gnome.shell.extensions.Bluetooth-Battery-Meter",
+        "settings": (
+            "modify-quick-settings",
+            "popup-in-quick-settings",
+            "enable-battery-level-icon",
+            "enable-battery-level-text",
+            "swap-icon-text",
+            "sort-devices-by-history",
+            "indicator-type",
+            "enable-on-hover-mode",
+            "on-hover-delay",
+            "enable-tooltip",
+            "indicator-size",
+            "disable-level-in-icon",
+        ),
+    },
+    {
+        "name": "Dash to Panel",
+        "uuid": "dash-to-panel@jderose9.github.com",
+        "description": "Turn GNOME's top bar and dock into a configurable taskbar.",
+        "schema": "org.gnome.shell.extensions.dash-to-panel",
+        "settings": (
+            "panel-position",
+            "panel-size",
+            "taskbar-locked",
+            "intellihide",
+            "show-window-previews",
+            "show-tooltip",
+            "show-running-apps",
+            "show-favorites",
+            "group-apps",
+            "multi-monitors",
+            "click-action",
+            "scroll-panel-action",
+            "scroll-icon-action",
+        ),
+    },
+)
 
 
 def run(command, check=True):
@@ -842,6 +917,8 @@ class App(Gtk.ApplicationWindow):
         self.syncing_features = False
         self.syncing_dock_layout = False
         self.syncing_sidebar = False
+        self.syncing_extensions = False
+        self.extension_modules = {}
         self.mouse_service = MouseMovementService()
         self.mouse_install_process = None
         self.mouse_install_timer_id = None
@@ -892,14 +969,14 @@ class App(Gtk.ApplicationWindow):
         self.stack.add_titled(chrome_scroller, "chrome", "Chrome Profiles")
         self.stack.add_titled(mouse_scroller, "mouse", "Mouse")
         self.stack.add_titled(clipboard_scroller, "clipboard", "Clipboard")
-        self.stack.add_titled(extensions_scroller, "extensions", "Extensions")
+        self.stack.add_titled(extensions_scroller, "extensions", "Modules")
 
         for name, title, icon in (
             ("overview", "Overview", "view-dashboard-symbolic"),
             ("chrome", "Chrome Profiles", "web-browser-symbolic"),
             ("mouse", "Mouse", "input-mouse-symbolic"),
             ("clipboard", "Clipboard", "edit-paste-symbolic"),
-            ("extensions", "Extensions", "preferences-system-symbolic"),
+            ("extensions", "Modules", "preferences-system-symbolic"),
         ):
             self.nav_list.add(self.create_nav_row(name, title, icon))
 
@@ -922,7 +999,7 @@ class App(Gtk.ApplicationWindow):
         main_tab.pack_start(summary_card, False, False, 0)
         self.overview_summary_box = Gtk.FlowBox()
         self.overview_summary_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.overview_summary_box.set_max_children_per_line(4)
+        self.overview_summary_box.set_max_children_per_line(5)
         self.overview_summary_box.set_column_spacing(8)
         self.overview_summary_box.set_row_spacing(8)
         summary_card.pack_start(self.overview_summary_box, False, False, 0)
@@ -1198,60 +1275,40 @@ class App(Gtk.ApplicationWindow):
         mouse_card.pack_start(self.mouse_warning_label, False, False, 0)
 
         extensions_intro = Gtk.Label()
-        extensions_intro.set_markup("<span size='large'><b>GNOME Extensions</b></span>")
+        extensions_intro.set_markup("<span size='large'><b>Modules</b></span>")
         extensions_intro.set_xalign(0)
         extensions_intro.set_line_wrap(True)
         extensions_intro.get_style_context().add_class("page-title")
         extensions_tab.pack_start(extensions_intro, False, False, 0)
 
         extensions_description = Gtk.Label(
-            label="Download and install essential GNOME extensions directly from extensions.gnome.org."
+            label="Manage essential GNOME extensions as first-class Linux Toolbox modules. Install once, then configure each feature here."
         )
         extensions_description.set_xalign(0)
         extensions_description.set_line_wrap(True)
         extensions_description.get_style_context().add_class("page-description")
         extensions_tab.pack_start(extensions_description, False, False, 0)
 
-        extensions_card = self.create_card("Install Extensions", "Select the extensions you want to install and enable.")
-        extensions_tab.pack_start(extensions_card, False, False, 0)
+        extensions_status_card = self.create_card(
+            "Module status",
+            "A module can be installed, enabled, and configured independently.",
+        )
+        extensions_tab.pack_start(extensions_status_card, False, False, 0)
+        self.extension_status_pills = self.create_status_table(
+            extensions_status_card,
+            (
+                ("installed", "Installed modules"),
+                ("enabled", "Enabled modules"),
+                ("configurable", "Configurable modules"),
+            ),
+        )
 
-        extensions_list = [
-            ("ArcMenu", "arcmenu@arcmenu.com", "Application menu for GNOME Shell."),
-            ("Bluetooth Battery Meter", "Bluetooth-Battery-Meter@maniacx.github.com", "Shows battery level of connected Bluetooth devices."),
-            ("Dash to Panel", "dash-to-panel@jderose9.github.com", "An icon taskbar for GNOME Shell (Note: Hides default dock).")
-        ]
-
-        for name, uuid, desc in extensions_list:
-            row = Gtk.ListBoxRow()
-            row.set_activatable(False)
-            row.set_selectable(False)
-            
-            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
-            box.set_margin_top(10)
-            box.set_margin_bottom(10)
-            box.set_margin_start(10)
-            box.set_margin_end(10)
-            
-            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-            title = Gtk.Label(label=f"<b>{name}</b>")
-            title.set_use_markup(True)
-            title.set_xalign(0)
-            vbox.pack_start(title, False, False, 0)
-            
-            subtitle = Gtk.Label(label=desc)
-            subtitle.set_xalign(0)
-            subtitle.get_style_context().add_class("dim-label")
-            vbox.pack_start(subtitle, False, False, 0)
-            
-            box.pack_start(vbox, True, True, 0)
-            
-            button = Gtk.Button(label="Install & Enable")
-            button.set_valign(Gtk.Align.CENTER)
-            button.connect("clicked", self.on_install_extension_clicked, uuid, name)
-            box.pack_end(button, False, False, 0)
-            
-            row.add(box)
-            extensions_card.pack_start(row, False, False, 0)
+        self.extension_modules_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        extensions_tab.pack_start(self.extension_modules_box, False, False, 0)
+        for module in EXTENSION_MODULES:
+            module_state = self.create_extension_module_card(module)
+            self.extension_modules[module["uuid"]] = module_state
+            self.extension_modules_box.pack_start(module_state["card"], False, False, 0)
 
         clipboard_intro = Gtk.Label()
         clipboard_intro.set_markup("<span size='large'><b>Clipboard</b></span>")
@@ -1337,6 +1394,7 @@ class App(Gtk.ApplicationWindow):
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_extension_modules()
         self.refresh_overview_summary()
         self.stack.set_visible_child_name("overview")
         self.nav_list.select_row(self.nav_list.get_row_at_index(0))
@@ -1520,6 +1578,303 @@ class App(Gtk.ApplicationWindow):
         parent.pack_start(row, False, False, 0)
         return check, pill
 
+    def create_extension_module_card(self, module):
+        """Create one self-contained extension module.
+
+        The card deliberately keeps installation, enablement, and settings in
+        the same place. This makes an extension behave like Clipboard or Mouse
+        instead of leaving the user with an install-only action.
+        """
+        uuid = module["uuid"]
+        card = self.create_card(module["name"], module["description"])
+        card.get_style_context().add_class("module-card")
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header.set_margin_top(4)
+        status_pill = self.make_pill("Not installed", "warn")
+        header.pack_start(status_pill, False, False, 0)
+
+        enabled_switch = Gtk.Switch()
+        enabled_switch.set_valign(Gtk.Align.CENTER)
+        enabled_switch.set_tooltip_text("Enable or disable this module without uninstalling it.")
+        enabled_switch.connect("state-set", self.on_extension_toggled, uuid)
+        header.pack_end(enabled_switch, False, False, 0)
+        card.pack_start(header, False, False, 0)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        install_button = self.create_primary_button(
+            "Install module",
+            "Download this GNOME extension and make its settings available here.",
+        )
+        install_button.set_hexpand(False)
+        install_button.connect("clicked", self.on_install_extension_clicked, uuid, module["name"])
+        actions.pack_start(install_button, False, False, 0)
+
+        preferences_button = Gtk.Button(label="Open full preferences")
+        preferences_button.set_no_show_all(True)
+        preferences_button.set_tooltip_text("Open the extension's complete GNOME preferences window.")
+        preferences_button.get_style_context().add_class("secondary-action")
+        preferences_button.connect("clicked", self.on_extension_open_preferences, uuid)
+        actions.pack_start(preferences_button, False, False, 0)
+
+        reset_button = Gtk.Button(label="Reset featured settings")
+        reset_button.set_no_show_all(True)
+        reset_button.set_tooltip_text("Restore the featured settings in this module to their defaults.")
+        reset_button.get_style_context().add_class("secondary-action")
+        reset_button.connect("clicked", self.on_extension_reset_settings, uuid)
+        actions.pack_start(reset_button, False, False, 0)
+        card.pack_start(actions, False, False, 0)
+
+        configuration = Gtk.Expander(label="Configure in Linux Toolbox")
+        configuration.set_expanded(True)
+        configuration.set_no_show_all(True)
+        configuration_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        configuration_box.set_margin_top(8)
+        configuration.add(configuration_box)
+        card.pack_start(configuration, False, False, 0)
+
+        return {
+            "definition": module,
+            "uuid": uuid,
+            "card": card,
+            "status": status_pill,
+            "enabled_switch": enabled_switch,
+            "install_button": install_button,
+            "preferences_button": preferences_button,
+            "reset_button": reset_button,
+            "configuration": configuration,
+            "configuration_box": configuration_box,
+            "settings": None,
+            "schema": None,
+            "setting_widgets": {},
+        }
+
+    def create_extension_setting_row(self, state, settings, key_name, schema_key):
+        """Create a compact editor for a supported GSettings key."""
+        type_string = schema_key.get_value_type().dup_string()
+        current = settings.get_value(key_name).unpack()
+        summary = schema_key.get_summary() or self.extension_setting_label(key_name)
+        description = schema_key.get_description() or ""
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.set_margin_top(2)
+        row.set_margin_bottom(2)
+
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title = Gtk.Label(label=summary)
+        title.set_xalign(0)
+        title.set_line_wrap(True)
+        copy.pack_start(title, False, False, 0)
+        if description and description != summary:
+            detail = Gtk.Label(label=description)
+            detail.set_xalign(0)
+            detail.set_line_wrap(True)
+            detail.get_style_context().add_class("section-subtitle")
+            copy.pack_start(detail, False, False, 0)
+        row.pack_start(copy, True, True, 0)
+
+        editor = self.create_extension_setting_editor(
+            state,
+            settings,
+            key_name,
+            schema_key,
+            type_string,
+            current,
+        )
+        if editor is None:
+            return None
+        row.pack_end(editor, False, False, 0)
+        return row
+
+    def create_extension_setting_editor(self, state, settings, key_name, schema_key, type_string, current):
+        uuid = state["uuid"]
+        if type_string == "b":
+            switch = Gtk.Switch()
+            switch.set_valign(Gtk.Align.CENTER)
+            switch.set_active(bool(current))
+            switch.connect("state-set", self.on_extension_boolean_setting_changed, uuid, key_name)
+            state["setting_widgets"][key_name] = switch
+            return switch
+
+        choices = self.extension_setting_choices(schema_key)
+        if type_string == "s" and choices:
+            combo = Gtk.ComboBoxText()
+            for choice in choices:
+                combo.append(choice, self.extension_setting_label(choice))
+            combo.set_active_id(str(current))
+            combo.set_valign(Gtk.Align.CENTER)
+            combo.connect("changed", self.on_extension_combo_setting_changed, uuid, key_name)
+            state["setting_widgets"][key_name] = combo
+            return combo
+
+        if type_string in {"i", "u", "x", "t", "d"}:
+            lower, upper, digits = self.extension_numeric_bounds(key_name, type_string)
+            adjustment = Gtk.Adjustment(float(current), lower, upper, 1 if digits == 0 else 0.05, 10, 0)
+            spin = Gtk.SpinButton.new(adjustment, 1 if digits == 0 else 0.05, digits)
+            spin.set_numeric(True)
+            spin.set_valign(Gtk.Align.CENTER)
+            spin.connect("value-changed", self.on_extension_numeric_setting_changed, uuid, key_name, type_string)
+            state["setting_widgets"][key_name] = spin
+            return spin
+
+        if type_string in {"s", "as"}:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            entry = Gtk.Entry()
+            entry.set_width_chars(16)
+            entry.set_text(self.extension_setting_text(current))
+            entry.set_tooltip_text("Press Enter or Apply to save this value.")
+            entry.connect("activate", self.on_extension_entry_setting_changed, uuid, key_name, type_string)
+            apply_button = Gtk.Button(label="Apply")
+            apply_button.connect("clicked", self.on_extension_entry_setting_changed, uuid, key_name, type_string, entry)
+            row.pack_start(entry, True, True, 0)
+            row.pack_start(apply_button, False, False, 0)
+            state["setting_widgets"][key_name] = entry
+            return row
+
+        return None
+
+    def extension_setting_label(self, value):
+        text = str(value).replace("_", " ").replace("-", " ")
+        return " ".join(part.capitalize() for part in text.split())
+
+    def extension_setting_text(self, value):
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item) for item in value)
+        return str(value)
+
+    def extension_setting_choices(self, schema_key):
+        try:
+            setting_range = schema_key.get_range()
+            if isinstance(setting_range, tuple) and len(setting_range) == 2 and setting_range[0] == "enum":
+                return [str(value) for value in setting_range[1].unpack()]
+        except Exception:
+            pass
+        return []
+
+    def extension_setting_type_supported(self, type_string):
+        return type_string in {"b", "i", "u", "x", "t", "d", "s", "as"}
+
+    def extension_numeric_bounds(self, key_name, type_string):
+        if type_string == "d":
+            if "opacity" in key_name:
+                return 0.0, 1.0, 2
+            return -10000.0, 10000.0, 2
+        if type_string in {"u", "t"}:
+            lower = 0.0
+        else:
+            lower = 0.0 if any(word in key_name for word in ("size", "width", "height", "padding", "margin", "delay", "time", "radius")) else -100000.0
+        upper = 10000.0
+        if "opacity" in key_name:
+            upper = 100.0
+        return lower, upper, 0
+
+    def set_extension_setting_value(self, uuid, key_name, type_string, value):
+        state = self.extension_modules.get(uuid)
+        if not state or state.get("settings") is None:
+            raise RuntimeError("The module settings are not available.")
+        settings = state["settings"]
+        if type_string == "b":
+            value = bool(value)
+        elif type_string in {"i", "u", "x", "t"}:
+            value = int(value)
+        elif type_string == "d":
+            value = float(value)
+        elif type_string == "s":
+            value = str(value)
+        elif type_string == "as":
+            value = [item.strip() for item in str(value).split(",") if item.strip()]
+        else:
+            raise RuntimeError(f"Unsupported setting type: {type_string}")
+        settings.set_value(key_name, GLib.Variant(type_string, value))
+        self.log(f"{state['definition']['name']}: {self.extension_setting_label(key_name)} updated.")
+
+    def on_extension_boolean_setting_changed(self, _switch, state, uuid, key_name):
+        if self.syncing_extensions:
+            return False
+        try:
+            self.set_extension_setting_value(uuid, key_name, "b", state)
+        except Exception as error:
+            self.log(f"Could not update extension setting: {error}")
+            self.refresh_extension_modules()
+        return True
+
+    def on_extension_combo_setting_changed(self, combo, uuid, key_name):
+        if self.syncing_extensions:
+            return
+        value = combo.get_active_id()
+        if value is None:
+            return
+        try:
+            self.set_extension_setting_value(uuid, key_name, "s", value)
+        except Exception as error:
+            self.log(f"Could not update extension setting: {error}")
+            self.refresh_extension_modules()
+
+    def on_extension_numeric_setting_changed(self, spin, uuid, key_name, type_string):
+        if self.syncing_extensions:
+            return
+        try:
+            value = spin.get_value() if type_string == "d" else spin.get_value_as_int()
+            self.set_extension_setting_value(uuid, key_name, type_string, value)
+        except Exception as error:
+            self.log(f"Could not update extension setting: {error}")
+            self.refresh_extension_modules()
+
+    def on_extension_entry_setting_changed(self, widget, uuid, key_name, type_string, entry=None):
+        if self.syncing_extensions:
+            return
+        actual_entry = entry if entry is not None else widget
+        try:
+            self.set_extension_setting_value(uuid, key_name, type_string, actual_entry.get_text())
+        except Exception as error:
+            self.log(f"Could not update extension setting: {error}")
+
+    def on_extension_toggled(self, switch, enabled, uuid):
+        if self.syncing_extensions:
+            return False
+        state = self.extension_modules.get(uuid)
+        if not state or not self.extension_installed(uuid):
+            switch.set_state(False)
+            self.log("Install this module before enabling it.")
+            return True
+        try:
+            self.set_gnome_extension_enabled(uuid, enabled)
+            self.log(f"{state['definition']['name']} {'enabled' if enabled else 'disabled'}.")
+            switch.set_state(enabled)
+        except Exception as error:
+            self.log(f"Failed to update {state['definition']['name']}: {error}")
+            switch.set_state(not enabled)
+        self.refresh_extension_modules()
+        return True
+
+    def on_extension_reset_settings(self, _button, uuid):
+        state = self.extension_modules.get(uuid)
+        if not state or state.get("settings") is None:
+            return
+        try:
+            for key_name in state["definition"]["settings"]:
+                if state["schema"].get_key(key_name) is not None:
+                    state["settings"].reset(key_name)
+            self.log(f"{state['definition']['name']} module settings restored to defaults.")
+        except Exception as error:
+            self.log(f"Could not reset module settings: {error}")
+        self.refresh_extension_modules()
+
+    def on_extension_open_preferences(self, _button, uuid):
+        if shutil.which("gnome-extensions") is None:
+            self.log("gnome-extensions is not available on this system.")
+            return
+        try:
+            subprocess.Popen(
+                ["gnome-extensions", "prefs", uuid],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self.log("Opened the full GNOME preferences window.")
+        except Exception as error:
+            self.log(f"Could not open extension preferences: {error}")
+
     def log(self, message):
         self.status_label.set_text(message)
         buffer = self.log_view.get_buffer()
@@ -1685,6 +2040,12 @@ class App(Gtk.ApplicationWindow):
             dock_layout = self.dock_layout_label()
         except Exception:
             dock_layout = "Unavailable"
+        try:
+            module_summary = self.extension_module_summary()
+            module_level = "ok" if module_summary.startswith(str(len(self.extension_modules)) + "/") else "warn"
+        except Exception:
+            module_summary = "Unavailable"
+            module_level = "warn"
 
         pills = [
             ("Chrome Profiles: On" if chrome_ready else "Chrome Profiles: Setup", "ok" if chrome_ready else "warn"),
@@ -1694,6 +2055,7 @@ class App(Gtk.ApplicationWindow):
                 "ok" if mouse_installed and mouse_detected not in {"unknown", "default_ubuntu"} else ("warn" if mouse_installed else "err"),
             ),
             ("Clipboard: On" if clipboard_ready else "Clipboard: Off", "ok" if clipboard_ready else "warn"),
+            (f"Modules: {module_summary}", module_level),
         ]
         for text, level in pills:
             self.overview_summary_box.add(self.make_pill(text, level))
@@ -2194,11 +2556,10 @@ class App(Gtk.ApplicationWindow):
 
     def on_refresh(self, _button):
         self.refresh_compatibility()
-        self.refresh_current_style()
-        self.refresh_dock_layout_state()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_extension_modules()
         self.refresh_overview_summary()
 
 
@@ -2833,50 +3194,308 @@ class App(Gtk.ApplicationWindow):
         run(["gnome-extensions", "disable", HOVER_EXTENSION_UUID], check=False)
         run(["gnome-extensions", "enable", HOVER_EXTENSION_UUID], check=False)
 
+    def extension_directory(self, uuid):
+        existing_directories = []
+        for root in GNOME_EXTENSION_ROOTS:
+            candidate = root / uuid
+            if (candidate / "metadata.json").exists():
+                return candidate
+            if candidate.exists():
+                existing_directories.append(candidate)
+        if existing_directories:
+            return existing_directories[0]
+        return GNOME_EXTENSION_ROOTS[0] / uuid
+
+    def extension_installed(self, uuid):
+        directory = self.extension_directory(uuid)
+        return (directory / "metadata.json").exists()
+
+    def extension_enabled(self, uuid):
+        enabled = parse_gsettings_list(
+            run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False)
+        )
+        return uuid in enabled
+
+    def set_gnome_extension_enabled(self, uuid, enabled):
+        current = parse_gsettings_list(
+            run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False)
+        )
+        filtered = [item for item in current if item != uuid]
+        if enabled:
+            run(["gsettings", "set", "org.gnome.shell", "disable-user-extensions", "false"], check=False)
+            filtered.append(uuid)
+        run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", format_gsettings_list(filtered)])
+        if shutil.which("gnome-extensions"):
+            action = "enable" if enabled else "disable"
+            run(["gnome-extensions", action, uuid], check=False)
+
+    def extension_settings(self, module):
+        """Load an extension's local compiled schema without using global schemas."""
+        directory = self.extension_directory(module["uuid"])
+        schema_dir = directory / "schemas"
+        if not schema_dir.exists():
+            return None, None
+
+        try:
+            # Some extension packages ship XML only. Compile it locally so the
+            # module still works with both distro and extensions.gnome.org
+            # packages.
+            if not (schema_dir / "gschemas.compiled").exists() and shutil.which("glib-compile-schemas"):
+                run(["glib-compile-schemas", str(schema_dir)], check=False)
+            source = Gio.SettingsSchemaSource.new_from_directory(str(schema_dir), None, False)
+            local_schemas, _relocatable = source.list_schemas(False)
+            schema_id = module.get("schema")
+            if schema_id not in local_schemas:
+                metadata_path = directory / "metadata.json"
+                if metadata_path.exists():
+                    try:
+                        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                        candidate = metadata.get("settings-schema")
+                        if candidate in local_schemas:
+                            schema_id = candidate
+                    except Exception:
+                        pass
+            if schema_id not in local_schemas:
+                schema_id = next(
+                    (item for item in local_schemas if item.startswith("org.gnome.shell.extensions.")),
+                    None,
+                )
+            if not schema_id:
+                return None, None
+            schema = source.lookup(schema_id, False)
+            if schema is None:
+                return None, None
+            return Gio.Settings.new_full(schema, None, None), schema
+        except Exception as error:
+            self.log(f"Could not load {module['name']} settings: {error}")
+            return None, None
+
+    def refresh_extension_module(self, state):
+        module = state["definition"]
+        uuid = state["uuid"]
+        installed = self.extension_installed(uuid)
+        enabled = installed and self.extension_enabled(uuid)
+        settings, schema = self.extension_settings(module) if installed else (None, None)
+
+        if not installed:
+            self.set_pill(state["status"], "Not installed", "warn")
+        elif enabled:
+            self.set_pill(state["status"], "Enabled", "ok")
+        else:
+            self.set_pill(state["status"], "Installed · Off", "warn")
+
+        self.syncing_extensions = True
+        state["enabled_switch"].set_active(enabled)
+        self.syncing_extensions = False
+        state["enabled_switch"].set_sensitive(installed)
+        state["install_button"].set_visible(not installed)
+        state["install_button"].set_sensitive(not installed)
+        state["preferences_button"].set_visible(installed)
+        state["reset_button"].set_visible(settings is not None)
+        state["configuration"].set_visible(True)
+        state["settings"] = settings
+        state["schema"] = schema
+
+        configuration_box = state["configuration_box"]
+        for child in configuration_box.get_children():
+            child.destroy()
+        state["setting_widgets"] = {}
+
+        if not installed:
+            hint = Gtk.Label(
+                label="Install this module to unlock its settings. Installation is the only step that needs a download."
+            )
+            hint.set_xalign(0)
+            hint.set_line_wrap(True)
+            hint.get_style_context().add_class("section-subtitle")
+            configuration_box.pack_start(hint, False, False, 0)
+        elif settings is None or schema is None:
+            hint = Gtk.Label(
+                label="This module is installed, but it did not expose a local settings schema. Use Open full preferences to configure it."
+            )
+            hint.set_xalign(0)
+            hint.set_line_wrap(True)
+            hint.get_style_context().add_class("section-subtitle")
+            configuration_box.pack_start(hint, False, False, 0)
+        else:
+            grid = Gtk.Grid(column_spacing=12, row_spacing=7)
+            rendered = 0
+            for key_name in module["settings"]:
+                schema_key = schema.get_key(key_name)
+                if schema_key is None:
+                    continue
+                row = self.create_extension_setting_row(state, settings, key_name, schema_key)
+                if row is None:
+                    continue
+                grid.attach(row, 0, rendered, 1, 1)
+                rendered += 1
+            if rendered:
+                configuration_box.pack_start(grid, False, False, 0)
+                note = Gtk.Label(
+                    label="Changes are saved immediately. Use Open full preferences for advanced options not shown here."
+                )
+                note.set_xalign(0)
+                note.set_line_wrap(True)
+                note.get_style_context().add_class("section-subtitle")
+                configuration_box.pack_start(note, False, False, 0)
+            else:
+                hint = Gtk.Label(label="No supported settings were found for this module.")
+                hint.set_xalign(0)
+                hint.set_line_wrap(True)
+                configuration_box.pack_start(hint, False, False, 0)
+
+            advanced_keys = []
+            for key_name in schema.list_keys():
+                schema_key = schema.get_key(key_name)
+                if schema_key is None:
+                    continue
+                type_string = schema_key.get_value_type().dup_string()
+                if key_name not in module["settings"] and self.extension_setting_type_supported(type_string):
+                    advanced_keys.append(key_name)
+            if advanced_keys:
+                advanced = Gtk.Expander(label=f"Advanced settings ({len(advanced_keys)})")
+                advanced_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+                advanced_box.set_margin_top(8)
+                advanced_hint = Gtk.Label(
+                    label="All other simple GSettings keys are available here. Complex keys stay in the full GNOME preferences window."
+                )
+                advanced_hint.set_xalign(0)
+                advanced_hint.set_line_wrap(True)
+                advanced_hint.get_style_context().add_class("section-subtitle")
+                advanced_box.pack_start(advanced_hint, False, False, 0)
+                advanced_combo = Gtk.ComboBoxText()
+                for key_name in sorted(advanced_keys):
+                    schema_key = schema.get_key(key_name)
+                    label = schema_key.get_summary() or self.extension_setting_label(key_name)
+                    advanced_combo.append(key_name, label)
+                advanced_box.pack_start(advanced_combo, False, False, 0)
+                advanced_editor = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+                advanced_box.pack_start(advanced_editor, False, False, 0)
+                advanced.add(advanced_box)
+                advanced_combo.connect(
+                    "changed",
+                    self.on_extension_advanced_key_changed,
+                    state,
+                    advanced_editor,
+                )
+                advanced_combo.set_active(0)
+                configuration_box.pack_start(advanced, False, False, 0)
+        configuration_box.show_all()
+
+    def on_extension_advanced_key_changed(self, combo, state, editor_box):
+        if self.syncing_extensions:
+            return
+        key_name = combo.get_active_id()
+        if not key_name or state.get("schema") is None or state.get("settings") is None:
+            return
+        for child in editor_box.get_children():
+            child.destroy()
+        row = self.create_extension_setting_row(
+            state,
+            state["settings"],
+            key_name,
+            state["schema"].get_key(key_name),
+        )
+        if row is None:
+            row = Gtk.Label(label="This setting uses a complex value. Open full preferences to edit it.")
+            row.set_xalign(0)
+            row.set_line_wrap(True)
+        editor_box.pack_start(row, False, False, 0)
+        editor_box.show_all()
+
+    def refresh_extension_modules(self):
+        if not hasattr(self, "extension_modules") or not self.extension_modules:
+            return
+        for state in self.extension_modules.values():
+            self.refresh_extension_module(state)
+
+        installed_count = 0
+        enabled_count = 0
+        configurable_count = 0
+        for state in self.extension_modules.values():
+            if self.extension_installed(state["uuid"]):
+                installed_count += 1
+                if self.extension_enabled(state["uuid"]):
+                    enabled_count += 1
+                if state.get("settings") is not None:
+                    configurable_count += 1
+        if hasattr(self, "extension_status_pills"):
+            total = len(self.extension_modules)
+            self.set_pill(
+                self.extension_status_pills["installed"],
+                f"{installed_count}/{total}",
+                "ok" if installed_count else "warn",
+            )
+            self.set_pill(
+                self.extension_status_pills["enabled"],
+                f"{enabled_count}/{total}",
+                "ok" if enabled_count else "warn",
+            )
+            self.set_pill(
+                self.extension_status_pills["configurable"],
+                f"{configurable_count}/{total}",
+                "ok" if configurable_count else "warn",
+            )
+
+    def extension_module_summary(self):
+        if not self.extension_modules:
+            return "No modules installed"
+        enabled = sum(1 for state in self.extension_modules.values() if self.extension_enabled(state["uuid"]))
+        return f"{enabled}/{len(self.extension_modules)} enabled"
+
     def on_install_extension_clicked(self, button, uuid, name):
         button.set_sensitive(False)
-        button.set_label("Installing...")
-        
+        button.set_label("Installing…")
+
         def do_install():
             success = self.install_gnome_extension(uuid)
-            GLib.idle_add(self.finish_install_extension, button, success)
-            
+            GLib.idle_add(self.finish_install_extension, button, uuid, name, success)
+
         import threading
         threading.Thread(target=do_install, daemon=True).start()
-        
-    def finish_install_extension(self, button, success):
+
+    def finish_install_extension(self, button, uuid, name, success):
         if success:
-            button.set_label("Installed & Enabled")
+            try:
+                self.set_gnome_extension_enabled(uuid, True)
+                self.log(f"{name} installed and enabled. Configure it in this module card.")
+            except Exception as error:
+                self.log(f"{name} installed, but could not enable it automatically: {error}")
         else:
-            button.set_label("Failed")
+            self.log(f"Could not install {name}. Check your network connection and GNOME Shell version.")
+            button.set_label("Install module")
             button.set_sensitive(True)
-            
+        self.refresh_extension_modules()
+
     def install_gnome_extension(self, uuid):
         import urllib.request
-        import json
         import zipfile
         import io
-        import os
-        import subprocess
-        
+
         try:
             major_version = self.gnome_shell_major_version()
             api_url = f"https://extensions.gnome.org/extension-info/?uuid={uuid}&shell_version={major_version}"
-            
+
             with urllib.request.urlopen(api_url) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 download_url = "https://extensions.gnome.org" + data["download_url"]
-                
+
             with urllib.request.urlopen(download_url) as response:
                 zip_data = response.read()
-                
-            ext_dir = os.path.expanduser(f"~/.local/share/gnome-shell/extensions/{uuid}")
-            os.makedirs(ext_dir, exist_ok=True)
-            
+
+            ext_dir = GNOME_EXTENSION_ROOTS[0] / uuid
+            ext_dir.mkdir(parents=True, exist_ok=True)
+
             with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
                 z.extractall(ext_dir)
-                
-            subprocess.run(["gnome-extensions", "enable", uuid], check=True)
+
+            schema_dir = ext_dir / "schemas"
+            if (
+                schema_dir.exists()
+                and not (schema_dir / "gschemas.compiled").exists()
+                and shutil.which("glib-compile-schemas")
+            ):
+                run(["glib-compile-schemas", str(schema_dir)], check=False)
             return True
         except Exception as e:
             print(f"Failed to install extension {uuid}: {e}")
