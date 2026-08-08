@@ -9,10 +9,10 @@ set -Eeuo pipefail
 # is never purged.
 
 readonly FORK_REPOSITORY="https://github.com/HNam1234/cockpit-tools-linux-codex.git"
-readonly FORK_BRANCH="main"
+readonly FORK_BRANCH="${COCKPIT_FORK_BRANCH:-linux-codex-desktop-support}"
 readonly UPSTREAM_REPOSITORY="${COCKPIT_UPSTREAM_REPOSITORY:-https://github.com/jlcodes99/cockpit-tools.git}"
 readonly UPSTREAM_BRANCH="${COCKPIT_UPSTREAM_BRANCH:-main}"
-readonly PATCH_SET="codex-fork-endpoints-v1"
+readonly PATCH_SET="codex-linux-desktop-v1+fork-endpoints-v1"
 readonly PACKAGE_NAME="cockpit-tools"
 readonly PACKAGE_BINARY="/usr/bin/cockpit-tools"
 readonly DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -36,6 +36,7 @@ if [ "${2:-}" = "--stop-running" ]; then
   stop_running=true
 fi
 source_ref_used="$UPSTREAM_BRANCH"
+fork_patch_commit=""
 
 mkdir -p "$(dirname "$INSTALL_LOG")" "$BUILD_ROOT"
 exec > >(tee -a "$INSTALL_LOG") 2>&1
@@ -289,10 +290,45 @@ print(f"Applied {patched_files} patched source files.")
 PY
 }
 
+apply_linux_codex_patch() {
+  local source_path="${1:-$SOURCE_DIR}"
+  local fork_ref="refs/remotes/codex-fork/$FORK_BRANCH"
+  local patch_path="$BUILD_ROOT/linux-codex-desktop.patch"
+  local patch_parent
+
+  log "Fetching Linux Codex Desktop support patch from $FORK_BRANCH."
+  git -C "$source_path" fetch --force --depth 2 "$FORK_REPOSITORY" \
+    "refs/heads/$FORK_BRANCH:$fork_ref"
+  fork_patch_commit="$(git -C "$source_path" rev-parse "$fork_ref")"
+  patch_parent="$(git -C "$source_path" rev-parse "$fork_ref^")"
+
+  git -C "$source_path" diff --binary "$patch_parent" "$fork_ref" -- \
+    src-tauri/src/modules/process.rs > "$patch_path"
+  [ -s "$patch_path" ] || die "Fork branch $FORK_BRANCH contains no Linux Codex process patch."
+
+  if grep -q 'CODEX_MULTI_LAUNCH' "$source_path/src-tauri/src/modules/process.rs" \
+    && grep -q 'detect_codex_exec_path_linux' "$source_path/src-tauri/src/modules/process.rs"; then
+    log "Upstream source already contains Linux Codex Desktop switching support; no code patch was needed."
+    return 0
+  fi
+
+  if ! git -C "$source_path" apply --check --3way "$patch_path"; then
+    die "The Linux Codex Desktop patch no longer applies cleanly to $source_ref_used. The installed package was not changed."
+  fi
+  git -C "$source_path" apply --3way "$patch_path"
+
+  grep -q 'CODEX_MULTI_LAUNCH' "$source_path/src-tauri/src/modules/process.rs" \
+    || die "Linux Codex patch validation failed: CODEX_MULTI_LAUNCH support is missing."
+  grep -q 'detect_codex_exec_path_linux' "$source_path/src-tauri/src/modules/process.rs" \
+    || die "Linux Codex patch validation failed: launcher detection is missing."
+  log "Applied Linux Codex Desktop switching patch ${fork_patch_commit:0:12}."
+}
+
 build_deb() {
   ensure_toolchain
   ensure_apt_build_dependencies
   prepare_source
+  apply_linux_codex_patch
   patch_fork_endpoints
 
   log "Installing JavaScript dependencies with npm ci."
@@ -326,7 +362,7 @@ write_marker() {
   local commit="$2"
   local binary_hash="$3"
   mkdir -p "$TOOLBOX_DATA_DIR"
-  python3 - "$MARKER_PATH" "$version" "$commit" "$binary_hash" "$FORK_REPOSITORY" "$UPSTREAM_REPOSITORY" "$PATCH_SET" "$source_ref_used" <<'PY'
+  python3 - "$MARKER_PATH" "$version" "$commit" "$binary_hash" "$FORK_REPOSITORY" "$FORK_BRANCH" "$UPSTREAM_REPOSITORY" "$PATCH_SET" "$source_ref_used" "$fork_patch_commit" <<'PY'
 import json
 import os
 import pathlib
@@ -337,10 +373,11 @@ target = pathlib.Path(sys.argv[1])
 marker = {
     "managedBy": "Linux Toolbox",
     "repository": sys.argv[5],
-    "branch": "main",
-    "sourceRepository": sys.argv[6],
-    "patchSet": sys.argv[7],
-    "sourceRef": sys.argv[8],
+    "branch": sys.argv[6],
+    "sourceRepository": sys.argv[7],
+    "patchSet": sys.argv[8],
+    "sourceRef": sys.argv[9],
+    "forkPatchCommit": sys.argv[10],
     "version": sys.argv[2],
     "commit": sys.argv[3],
     "binarySha256": sys.argv[4],

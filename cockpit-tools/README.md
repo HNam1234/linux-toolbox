@@ -10,8 +10,9 @@ It is also available inside the Linux Toolbox GUI under **Cockpit Fork**.
 ./install.sh install --stop-running
 ```
 
-The installer fetches the upstream Cockpit Tools source, applies the local
-Codex patch, and validates the `.deb` before touching an existing
+The installer fetches the upstream Cockpit Tools source, applies the Linux
+Codex Desktop switching patch from the fork's
+`linux-codex-desktop-support` branch, and validates the `.deb` before touching an existing
 `cockpit-tools` package. If the official package is installed, it removes only
 the package and installs the patched build; it does not purge Cockpit
 account/config data. The installer writes a marker under
@@ -24,6 +25,13 @@ Useful commands:
 ./install.sh status
 ./install.sh repair --stop-running
 ./install.sh uninstall --stop-running
+```
+
+From the Linux Toolbox repository root, the shorter command below is also
+supported and dispatches to this installer:
+
+```bash
+./install.sh patch --stop-running
 ```
 
 Use `repair` (or its `patch` alias) when an official Cockpit update has

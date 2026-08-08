@@ -7,6 +7,21 @@ desktop_file="$HOME/.local/share/applications/chrome-dock-profiles.desktop"
 new_desktop_file="$HOME/.local/share/applications/linux-toolbox.desktop"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Keep the natural `./install.sh patch` command useful instead of silently
+# reinstalling Linux Toolbox while ignoring the Cockpit action.
+case "${1:-}" in
+  patch|repair)
+    exec "$script_dir/cockpit-tools/install.sh" "$@"
+    ;;
+  cockpit)
+    shift
+    if [ "$#" -eq 0 ]; then
+      set -- install
+    fi
+    exec "$script_dir/cockpit-tools/install.sh" "$@"
+    ;;
+esac
+
 mkdir -p "$app_dir" "$bin_dir" "$HOME/.local/share/applications"
 cp "$script_dir/chrome_dock_profiles.py" "$app_dir/chrome_dock_profiles.py"
 rm -rf "$app_dir/src"

@@ -26,7 +26,7 @@ MARKER_PATH = DATA_DIR / "cockpit-tools-fork.json"
 PACKAGE_NAME = "cockpit-tools"
 PACKAGE_BINARY = Path("/usr/bin/cockpit-tools")
 FORK_REPOSITORY = "https://github.com/HNam1234/cockpit-tools-linux-codex.git"
-FORK_BRANCH = "main"
+FORK_BRANCH = "linux-codex-desktop-support"
 
 
 def _run(command):

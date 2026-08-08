@@ -35,7 +35,7 @@ The app gives you a guided tabbed GUI with:
 - Dedicated ArcMenu, Bluetooth Battery Meter, and Dash to Panel tabs with independent install, enable/disable, reset, and inline GSettings controls.
 - A Clipboard tab with CopyQ clipboard history toggle and `Super+V` binding.
 - A Mouse Movement tab with install status, maccel installer progress, Windows, macOS, and Restore Original buttons.
-- A Cockpit Fork tab that builds and installs `HNam1234/cockpit-tools-linux-codex`, replacing an official `cockpit-tools` package only after the fork `.deb` has been built and validated.
+- A Cockpit Fork tab that applies the fork's `linux-codex-desktop-support` account-switching patch to upstream Cockpit Tools, replacing an official `cockpit-tools` package only after the patched `.deb` has been built and validated.
 
 The old `chrome-dock-profiles` command is still installed as a compatibility alias for existing users.
 
