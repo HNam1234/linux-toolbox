@@ -886,20 +886,20 @@ class App(Gtk.ApplicationWindow):
         chrome_scroller, chrome_tab = self.create_tab_page()
         mouse_scroller, mouse_tab = self.create_tab_page()
         clipboard_scroller, clipboard_tab = self.create_tab_page()
-        dock_scroller, dock_tab = self.create_tab_page()
+        extensions_scroller, extensions_tab = self.create_tab_page()
 
         self.stack.add_titled(main_scroller, "overview", "Overview")
         self.stack.add_titled(chrome_scroller, "chrome", "Chrome Profiles")
         self.stack.add_titled(mouse_scroller, "mouse", "Mouse")
         self.stack.add_titled(clipboard_scroller, "clipboard", "Clipboard")
-        self.stack.add_titled(dock_scroller, "dock", "Dock Style")
+        self.stack.add_titled(extensions_scroller, "extensions", "Extensions")
 
         for name, title, icon in (
             ("overview", "Overview", "view-dashboard-symbolic"),
             ("chrome", "Chrome Profiles", "web-browser-symbolic"),
             ("mouse", "Mouse", "input-mouse-symbolic"),
             ("clipboard", "Clipboard", "edit-paste-symbolic"),
-            ("dock", "Dock Style", "preferences-desktop-symbolic"),
+            ("extensions", "Extensions", "preferences-system-symbolic"),
         ):
             self.nav_list.add(self.create_nav_row(name, title, icon))
 
@@ -1199,97 +1199,61 @@ class App(Gtk.ApplicationWindow):
         self.mouse_warning_label.set_line_wrap(True)
         mouse_card.pack_start(self.mouse_warning_label, False, False, 0)
 
-        dock_intro = Gtk.Label()
-        dock_intro.set_markup("<span size='large'><b>Dock Style</b></span>")
-        dock_intro.set_xalign(0)
-        dock_intro.set_line_wrap(True)
-        dock_intro.get_style_context().add_class("page-title")
-        dock_tab.pack_start(dock_intro, False, False, 0)
+        extensions_intro = Gtk.Label()
+        extensions_intro.set_markup("<span size='large'><b>GNOME Extensions</b></span>")
+        extensions_intro.set_xalign(0)
+        extensions_intro.set_line_wrap(True)
+        extensions_intro.get_style_context().add_class("page-title")
+        extensions_tab.pack_start(extensions_intro, False, False, 0)
 
-        dock_description = Gtk.Label(
-            label="Set the Ubuntu Dock layout and click behavior to match your workflow."
+        extensions_description = Gtk.Label(
+            label="Download and install essential GNOME extensions directly from extensions.gnome.org."
         )
-        dock_description.set_xalign(0)
-        dock_description.set_line_wrap(True)
-        dock_description.get_style_context().add_class("page-description")
-        dock_tab.pack_start(dock_description, False, False, 0)
+        extensions_description.set_xalign(0)
+        extensions_description.set_line_wrap(True)
+        extensions_description.get_style_context().add_class("page-description")
+        extensions_tab.pack_start(extensions_description, False, False, 0)
 
-        dock_status_card = self.create_card("Status Check", "Dash-to-Dock dependency and current behavior.")
-        dock_tab.pack_start(dock_status_card, False, False, 0)
-        self.dock_status_pills = self.create_status_table(
-            dock_status_card,
-            (
-                ("schema", "Dash-to-Dock schema"),
-                ("layout", "Dock layout"),
-                ("click", "Click style"),
-                ("restore", "Restore point"),
-            ),
-        )
+        extensions_card = self.create_card("Install Extensions", "Select the extensions you want to install and enable.")
+        extensions_tab.pack_start(extensions_card, False, False, 0)
 
-        layout_card = self.create_card("Dock Layout", "Set the Ubuntu Dock once to a Windows-style horizontal taskbar.")
-        dock_tab.pack_start(layout_card, False, False, 0)
+        extensions_list = [
+            ("ArcMenu", "arcmenu@arcmenu.com", "Application menu for GNOME Shell."),
+            ("Bluetooth Battery Meter", "Bluetooth-Battery-Meter@maniacx.github.com", "Shows battery level of connected Bluetooth devices."),
+            ("Dash to Panel", "dash-to-panel@jderose9.github.com", "An icon taskbar for GNOME Shell (Note: Hides default dock).")
+        ]
 
-        self.dock_layout_switch = self.create_feature_switch(
-            layout_card,
-            "Windows Taskbar Layout",
-            "Turn on the bottom Windows-style dock. Turn off to restore the Ubuntu default dock layout.",
-            self.on_dock_layout_switch_toggled,
-        )
-
-        layout_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
-        layout_card.pack_start(layout_grid, False, False, 0)
-
-        self.dock_windows_button = self.create_primary_button(
-            "Apply Windows Taskbar",
-            "Move the dock to the bottom, stretch it across the screen, and keep it visible.",
-        )
-        self.dock_windows_button.connect("clicked", self.on_dock_windows_taskbar)
-        layout_grid.attach(self.dock_windows_button, 0, 0, 1, 1)
-        self.dock_windows_button.set_no_show_all(True)
-        self.dock_windows_button.hide()
-
-        self.dock_restore_button = Gtk.Button(label="Restore Original")
-        self.dock_restore_button.set_no_show_all(True)
-        self.dock_restore_button.set_tooltip_text("Restore the dock layout saved before Linux Toolbox changed it.")
-        self.dock_restore_button.connect("clicked", self.on_dock_restore_layout)
-        layout_grid.attach(self.dock_restore_button, 1, 0, 1, 1)
-
-        self.dock_layout_status_label = Gtk.Label()
-        self.dock_layout_status_label.set_xalign(0)
-        self.dock_layout_status_label.set_line_wrap(True)
-        layout_card.pack_start(self.dock_layout_status_label, False, False, 0)
-
-        style_card = self.create_card("Dock Click Style", "Choose how a normal left-click on a dock icon behaves.")
-        dock_tab.pack_start(style_card, False, False, 0)
-
-        style_hint = Gtk.Label(label="Choose how a normal left-click on a dock icon behaves.")
-        style_hint.set_xalign(0)
-        style_hint.set_line_wrap(True)
-        style_card.pack_start(style_hint, False, False, 0)
-
-        self.style_buttons = {}
-        style_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
-        style_card.pack_start(style_grid, False, False, 10)
-
-        previous = None
-        for index, (name, (action, help_text)) in enumerate(STYLE_ACTIONS.items()):
-            button = Gtk.RadioButton.new_with_label_from_widget(previous, name)
-            previous = button
-            button.set_tooltip_text(help_text)
-            button.connect("toggled", self.on_style_toggled, action)
-            self.style_buttons[action] = button
-            style_grid.attach(button, index % 2, index // 2, 1, 1)
-
-        self.style_restore_button = Gtk.Button(label="Restore Original")
-        self.style_restore_button.set_no_show_all(True)
-        self.style_restore_button.set_tooltip_text("Restore the dock click behavior saved before Linux Toolbox changed it.")
-        self.style_restore_button.connect("clicked", self.on_dock_restore_style)
-        style_grid.attach(self.style_restore_button, 0, 2, 2, 1)
-
-        self.style_description = Gtk.Label()
-        self.style_description.set_xalign(0)
-        self.style_description.set_line_wrap(True)
-        style_card.pack_start(self.style_description, False, False, 0)
+        for name, uuid, desc in extensions_list:
+            row = Gtk.ListBoxRow()
+            row.set_activatable(False)
+            row.set_selectable(False)
+            
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+            box.set_margin_top(10)
+            box.set_margin_bottom(10)
+            box.set_margin_start(10)
+            box.set_margin_end(10)
+            
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            title = Gtk.Label(label=f"<b>{name}</b>")
+            title.set_use_markup(True)
+            title.set_xalign(0)
+            vbox.pack_start(title, False, False, 0)
+            
+            subtitle = Gtk.Label(label=desc)
+            subtitle.set_xalign(0)
+            subtitle.get_style_context().add_class("dim-label")
+            vbox.pack_start(subtitle, False, False, 0)
+            
+            box.pack_start(vbox, True, True, 0)
+            
+            button = Gtk.Button(label="Install & Enable")
+            button.set_valign(Gtk.Align.CENTER)
+            button.connect("clicked", self.on_install_extension_clicked, uuid, name)
+            box.pack_end(button, False, False, 0)
+            
+            row.add(box)
+            extensions_card.pack_start(row, False, False, 0)
 
         clipboard_intro = Gtk.Label()
         clipboard_intro.set_markup("<span size='large'><b>Clipboard</b></span>")
@@ -2889,6 +2853,55 @@ class App(Gtk.ApplicationWindow):
             return
         run(["gnome-extensions", "disable", HOVER_EXTENSION_UUID], check=False)
         run(["gnome-extensions", "enable", HOVER_EXTENSION_UUID], check=False)
+
+    def on_install_extension_clicked(self, button, uuid, name):
+        button.set_sensitive(False)
+        button.set_label("Installing...")
+        
+        def do_install():
+            success = self.install_gnome_extension(uuid)
+            GLib.idle_add(self.finish_install_extension, button, success)
+            
+        import threading
+        threading.Thread(target=do_install, daemon=True).start()
+        
+    def finish_install_extension(self, button, success):
+        if success:
+            button.set_label("Installed & Enabled")
+        else:
+            button.set_label("Failed")
+            button.set_sensitive(True)
+            
+    def install_gnome_extension(self, uuid):
+        import urllib.request
+        import json
+        import zipfile
+        import io
+        import os
+        import subprocess
+        
+        try:
+            major_version = self.gnome_shell_major_version()
+            api_url = f"https://extensions.gnome.org/extension-info/?uuid={uuid}&shell_version={major_version}"
+            
+            with urllib.request.urlopen(api_url) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                download_url = "https://extensions.gnome.org" + data["download_url"]
+                
+            with urllib.request.urlopen(download_url) as response:
+                zip_data = response.read()
+                
+            ext_dir = os.path.expanduser(f"~/.local/share/gnome-shell/extensions/{uuid}")
+            os.makedirs(ext_dir, exist_ok=True)
+            
+            with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+                z.extractall(ext_dir)
+                
+            subprocess.run(["gnome-extensions", "enable", uuid], check=True)
+            return True
+        except Exception as e:
+            print(f"Failed to install extension {uuid}: {e}")
+            return False
 
     def install_hover_extension(self):
         extension_resource, shell_versions = self.hover_extension_bundle()
