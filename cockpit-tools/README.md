@@ -42,6 +42,8 @@ the operation stops without changing the currently installed package.
 
 `uninstall` removes only a fork previously marked as managed by Linux Toolbox.
 It refuses to remove an official/unknown installation. The source build needs
-Node.js 18+, npm 9+, Rust/Cargo, Go, Git, and Ubuntu/Debian build libraries;
-missing Ubuntu packages are installed through `pkexec` unless
+Node.js 18+, npm 9+, Rust/Cargo, Git, and Ubuntu/Debian build libraries.
+The installer downloads a checksum-verified private Go 1.26.5 toolchain into
+its cache when the system Go is too old (x86_64 and arm64); it does not replace
+the system Go installation. Missing Ubuntu packages are installed through `pkexec` unless
 `COCKPIT_FORK_SKIP_APT=1` is set.

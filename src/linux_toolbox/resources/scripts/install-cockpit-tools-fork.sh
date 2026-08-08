@@ -26,6 +26,8 @@ readonly ARTIFACT_DIR="$BUILD_ROOT/artifacts"
 readonly INSTALL_LOG="$STATE_HOME/linux-toolbox/cockpit-tools-fork-install.log"
 readonly MARKER_PATH="$TOOLBOX_DATA_DIR/cockpit-tools-fork.json"
 readonly LOCK_PATH="$BUILD_ROOT/install.lock"
+readonly GO_BOOTSTRAP_VERSION="1.26.5"
+readonly GO_BOOTSTRAP_ROOT="$BUILD_ROOT/go$GO_BOOTSTRAP_VERSION"
 
 # Desktop launchers do not always source a user's shell profile.
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
@@ -185,7 +187,7 @@ ensure_apt_build_dependencies() {
 }
 
 ensure_toolchain() {
-  local required_commands=(git node npm npx cargo rustc go python3 dpkg dpkg-deb)
+  local required_commands=(git node npm npx cargo rustc python3 dpkg dpkg-deb)
   local missing_commands=()
   local command_to_check
   for command_to_check in "${required_commands[@]}"; do
@@ -200,7 +202,7 @@ ensure_toolchain() {
     fi
     log "Installing missing build tools: ${missing_commands[*]}"
     run_as_root apt-get update
-    run_as_root apt-get install -y git nodejs npm cargo rustc golang-go python3 dpkg
+    run_as_root apt-get install -y git nodejs npm cargo rustc python3 dpkg
   fi
 
   local node_major npm_major
@@ -212,6 +214,85 @@ ensure_toolchain() {
   if [ "${npm_major:-0}" -lt 9 ]; then
     die "npm 9+ is required by the fork; found $(npm --version 2>/dev/null || printf unknown)."
   fi
+}
+
+go_version_is_supported() {
+  local go_binary="$1"
+  local version_text major minor
+  version_text="$("$go_binary" version 2>/dev/null || true)"
+  if [[ "$version_text" =~ go([0-9]+)\.([0-9]+)(\.[0-9]+)? ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 26 ]; }
+    return
+  fi
+  return 1
+}
+
+ensure_go_toolchain() {
+  local system_go=""
+  if command -v go >/dev/null 2>&1; then
+    system_go="$(command -v go)"
+  fi
+  if [ -n "$system_go" ] && go_version_is_supported "$system_go"; then
+    log "Using system Go toolchain: $($system_go version)"
+    return 0
+  fi
+
+  require_command curl
+  require_command tar
+  require_command sha256sum
+
+  local go_arch go_sha256
+  case "$(uname -m)" in
+    x86_64|amd64)
+      go_arch="amd64"
+      go_sha256="5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
+      ;;
+    aarch64|arm64)
+      go_arch="arm64"
+      go_sha256="fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49"
+      ;;
+    *)
+      die "Cockpit Tools requires Go 1.26+; automatic bootstrap supports x86_64 and arm64 only (found $(uname -m))."
+      ;;
+  esac
+
+  local archive_name="go${GO_BOOTSTRAP_VERSION}.linux-${go_arch}.tar.gz"
+  local archive_path="$BUILD_ROOT/$archive_name"
+  local archive_hash=""
+  if [ -f "$archive_path" ]; then
+    archive_hash="$(sha256sum "$archive_path" | cut -d' ' -f1)"
+  fi
+  if [ "$archive_hash" != "$go_sha256" ]; then
+    local download_path="$archive_path.download.$$"
+    log "Downloading Go $GO_BOOTSTRAP_VERSION for the Cockpit sidecar build."
+    curl --fail --location --retry 3 --output "$download_path" \
+      "https://go.dev/dl/$archive_name"
+    archive_hash="$(sha256sum "$download_path" | cut -d' ' -f1)"
+    [ "$archive_hash" = "$go_sha256" ] \
+      || die "Downloaded Go archive checksum did not match the official Go release checksum."
+    mv "$download_path" "$archive_path"
+  fi
+
+  if [ ! -x "$GO_BOOTSTRAP_ROOT/bin/go" ]; then
+    local extraction_dir backup_path
+    extraction_dir="$(mktemp -d "$BUILD_ROOT/go-bootstrap.XXXXXX")"
+    tar -C "$extraction_dir" -xzf "$archive_path"
+    [ -x "$extraction_dir/go/bin/go" ] || die "Go bootstrap archive did not contain a usable go binary."
+    if [ -e "$GO_BOOTSTRAP_ROOT" ]; then
+      backup_path="$GO_BOOTSTRAP_ROOT.replaced.$(date +%s)"
+      mv "$GO_BOOTSTRAP_ROOT" "$backup_path"
+      log "Moved an unusable cached Go toolchain to $backup_path."
+    fi
+    mv "$extraction_dir/go" "$GO_BOOTSTRAP_ROOT"
+    rmdir "$extraction_dir"
+  fi
+
+  go_version_is_supported "$GO_BOOTSTRAP_ROOT/bin/go" \
+    || die "Cached Go bootstrap is not Go 1.26+ as expected."
+  export PATH="$GO_BOOTSTRAP_ROOT/bin:$PATH"
+  log "Using Linux Toolbox Go toolchain: $($GO_BOOTSTRAP_ROOT/bin/go version)"
 }
 
 prepare_source() {
@@ -290,6 +371,27 @@ print(f"Applied {patched_files} patched source files.")
 PY
 }
 
+normalize_go_module_directives() {
+  local source_path="${1:-$SOURCE_DIR}"
+  local sidecar_path="$source_path/sidecars/cockpit-cliproxy"
+  [ -d "$sidecar_path" ] || die "Cockpit CLIProxy sidecar source is missing: $sidecar_path"
+  python3 - "$sidecar_path" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+updated = []
+for path in root.rglob("go.mod"):
+    text = path.read_text(encoding="utf-8")
+    normalized = re.sub(r"(?m)^go ([0-9]+\.[0-9]+)\.0$", r"go \1", text)
+    if normalized != text:
+        path.write_text(normalized, encoding="utf-8")
+        updated.append(str(path.relative_to(root)))
+print("Normalized Go module directives: " + (", ".join(updated) if updated else "none needed"))
+PY
+}
+
 apply_linux_codex_patch() {
   local source_path="${1:-$SOURCE_DIR}"
   local fork_ref="refs/remotes/codex-fork/$FORK_BRANCH"
@@ -327,9 +429,11 @@ apply_linux_codex_patch() {
 build_deb() {
   ensure_toolchain
   ensure_apt_build_dependencies
+  ensure_go_toolchain
   prepare_source
   apply_linux_codex_patch
   patch_fork_endpoints
+  normalize_go_module_directives
 
   log "Installing JavaScript dependencies with npm ci."
   (
