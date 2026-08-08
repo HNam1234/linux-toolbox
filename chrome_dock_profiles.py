@@ -963,20 +963,26 @@ class App(Gtk.ApplicationWindow):
         chrome_scroller, chrome_tab = self.create_tab_page()
         mouse_scroller, mouse_tab = self.create_tab_page()
         clipboard_scroller, clipboard_tab = self.create_tab_page()
-        extensions_scroller, extensions_tab = self.create_tab_page()
+        arcmenu_scroller, arcmenu_tab = self.create_tab_page()
+        bluetooth_scroller, bluetooth_tab = self.create_tab_page()
+        dash_panel_scroller, dash_panel_tab = self.create_tab_page()
 
         self.stack.add_titled(main_scroller, "overview", "Overview")
         self.stack.add_titled(chrome_scroller, "chrome", "Chrome Profiles")
         self.stack.add_titled(mouse_scroller, "mouse", "Mouse")
         self.stack.add_titled(clipboard_scroller, "clipboard", "Clipboard")
-        self.stack.add_titled(extensions_scroller, "extensions", "Modules")
+        self.stack.add_titled(arcmenu_scroller, "arcmenu", "ArcMenu")
+        self.stack.add_titled(bluetooth_scroller, "bluetooth", "Bluetooth Battery")
+        self.stack.add_titled(dash_panel_scroller, "dash-panel", "Dash to Panel")
 
         for name, title, icon in (
             ("overview", "Overview", "view-dashboard-symbolic"),
             ("chrome", "Chrome Profiles", "web-browser-symbolic"),
             ("mouse", "Mouse", "input-mouse-symbolic"),
             ("clipboard", "Clipboard", "edit-paste-symbolic"),
-            ("extensions", "Modules", "preferences-system-symbolic"),
+            ("arcmenu", "ArcMenu", "view-app-grid-symbolic"),
+            ("bluetooth", "Bluetooth Battery", "bluetooth-active-symbolic"),
+            ("dash-panel", "Dash to Panel", "view-list-symbolic"),
         ):
             self.nav_list.add(self.create_nav_row(name, title, icon))
 
@@ -999,7 +1005,7 @@ class App(Gtk.ApplicationWindow):
         main_tab.pack_start(summary_card, False, False, 0)
         self.overview_summary_box = Gtk.FlowBox()
         self.overview_summary_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.overview_summary_box.set_max_children_per_line(5)
+        self.overview_summary_box.set_max_children_per_line(4)
         self.overview_summary_box.set_column_spacing(8)
         self.overview_summary_box.set_row_spacing(8)
         summary_card.pack_start(self.overview_summary_box, False, False, 0)
@@ -1011,7 +1017,7 @@ class App(Gtk.ApplicationWindow):
         self.overview_restore_buttons = {}
         for index, (key, title, tooltip, handler) in enumerate(
             (
-                ("chrome", "Chrome", "Remove profile launchers and hover previews.", self.on_chrome_restore_original),
+                ("chrome", "Chrome", "Remove Linux Toolbox Chrome profile launchers.", self.on_chrome_restore_original),
                 ("mouse", "Mouse", "Restore original maccel mouse settings.", self.on_mouse_restore),
                 ("clipboard", "Clipboard", "Restore original clipboard startup and shortcuts.", self.on_clipboard_restore_original),
             )
@@ -1056,7 +1062,7 @@ class App(Gtk.ApplicationWindow):
         chrome_tab.pack_start(chrome_intro, False, False, 0)
 
         chrome_description = Gtk.Label(
-            label="Install profile-specific launchers and add hover window previews."
+            label="Install profile-specific launchers and keep each Chrome profile separate in the dock."
         )
         chrome_description.set_xalign(0)
         chrome_description.set_line_wrap(True)
@@ -1071,11 +1077,10 @@ class App(Gtk.ApplicationWindow):
                 ("browser", "Chrome/Chromium"),
                 ("profiles", "Profiles found"),
                 ("icons", "Profile dock icons"),
-                ("hover", "Hover previews"),
             ),
         )
 
-        feature_card = self.create_card("Setup Flow", "Turn on the behavior you want. Turning it off restores the default path.")
+        feature_card = self.create_card("Setup Flow", "Turn Chrome profile dock icons on or off from here.")
         chrome_tab.pack_start(feature_card, False, False, 0)
 
         self.profile_switch = self.create_feature_switch(
@@ -1084,15 +1089,9 @@ class App(Gtk.ApplicationWindow):
             "Create, pin, and maintain one Ubuntu Dock icon per Chrome profile.",
             self.on_profile_feature_toggled,
         )
-        self.hover_switch = self.create_feature_switch(
-            feature_card,
-            "Hover Window Previews",
-            "Install and enable the local GNOME dock hover-preview extension.",
-            self.on_hover_feature_toggled,
-        )
         self.chrome_restore_button = Gtk.Button(label="Restore Original")
         self.chrome_restore_button.set_no_show_all(True)
-        self.chrome_restore_button.set_tooltip_text("Remove Linux Toolbox Chrome profile launchers and disable hover previews.")
+        self.chrome_restore_button.set_tooltip_text("Remove Linux Toolbox Chrome profile launchers.")
         self.chrome_restore_button.connect("clicked", self.on_chrome_restore_original)
         feature_card.pack_start(self.chrome_restore_button, False, False, 0)
 
@@ -1113,14 +1112,10 @@ class App(Gtk.ApplicationWindow):
         pin_button.connect("clicked", self.on_pin_profiles)
         setup_grid.attach(pin_button, 1, 0, 1, 1)
 
-        hover_button = self.create_primary_button("Install Hover Previews", "Show window thumbnails when hovering dock icons.")
-        hover_button.connect("clicked", self.on_install_hover)
-        setup_grid.attach(hover_button, 2, 0, 1, 1)
-
         chrome_restore_button = Gtk.Button(label="Restore Original")
-        chrome_restore_button.set_tooltip_text("Remove Linux Toolbox Chrome profile launchers and disable hover previews.")
+        chrome_restore_button.set_tooltip_text("Remove Linux Toolbox Chrome profile launchers.")
         chrome_restore_button.connect("clicked", self.on_chrome_restore_original)
-        setup_grid.attach(chrome_restore_button, 0, 1, 3, 1)
+        setup_grid.attach(chrome_restore_button, 0, 1, 2, 1)
 
         profile_card = self.create_card("Detected Profiles", "Chrome profiles found on this machine.")
         chrome_tab.pack_start(profile_card, True, True, 0)
@@ -1274,41 +1269,29 @@ class App(Gtk.ApplicationWindow):
         self.mouse_warning_label.set_line_wrap(True)
         mouse_card.pack_start(self.mouse_warning_label, False, False, 0)
 
-        extensions_intro = Gtk.Label()
-        extensions_intro.set_markup("<span size='large'><b>Modules</b></span>")
-        extensions_intro.set_xalign(0)
-        extensions_intro.set_line_wrap(True)
-        extensions_intro.get_style_context().add_class("page-title")
-        extensions_tab.pack_start(extensions_intro, False, False, 0)
+        for module, module_tab in (
+            (EXTENSION_MODULES[0], arcmenu_tab),
+            (EXTENSION_MODULES[1], bluetooth_tab),
+            (EXTENSION_MODULES[2], dash_panel_tab),
+        ):
+            module_intro = Gtk.Label()
+            module_intro.set_markup(f"<span size='large'><b>{GLib.markup_escape_text(module['name'])}</b></span>")
+            module_intro.set_xalign(0)
+            module_intro.set_line_wrap(True)
+            module_intro.get_style_context().add_class("page-title")
+            module_tab.pack_start(module_intro, False, False, 0)
 
-        extensions_description = Gtk.Label(
-            label="Manage essential GNOME extensions as first-class Linux Toolbox modules. Install once, then configure each feature here."
-        )
-        extensions_description.set_xalign(0)
-        extensions_description.set_line_wrap(True)
-        extensions_description.get_style_context().add_class("page-description")
-        extensions_tab.pack_start(extensions_description, False, False, 0)
+            module_description = Gtk.Label(
+                label=f"Configure {module['name']} directly in Linux Toolbox. Install it once, then manage its settings here."
+            )
+            module_description.set_xalign(0)
+            module_description.set_line_wrap(True)
+            module_description.get_style_context().add_class("page-description")
+            module_tab.pack_start(module_description, False, False, 0)
 
-        extensions_status_card = self.create_card(
-            "Module status",
-            "A module can be installed, enabled, and configured independently.",
-        )
-        extensions_tab.pack_start(extensions_status_card, False, False, 0)
-        self.extension_status_pills = self.create_status_table(
-            extensions_status_card,
-            (
-                ("installed", "Installed modules"),
-                ("enabled", "Enabled modules"),
-                ("configurable", "Configurable modules"),
-            ),
-        )
-
-        self.extension_modules_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        extensions_tab.pack_start(self.extension_modules_box, False, False, 0)
-        for module in EXTENSION_MODULES:
             module_state = self.create_extension_module_card(module)
             self.extension_modules[module["uuid"]] = module_state
-            self.extension_modules_box.pack_start(module_state["card"], False, False, 0)
+            module_tab.pack_start(module_state["card"], False, False, 0)
 
         clipboard_intro = Gtk.Label()
         clipboard_intro.set_markup("<span size='large'><b>Clipboard</b></span>")
@@ -1918,9 +1901,7 @@ class App(Gtk.ApplicationWindow):
     def refresh_feature_state(self):
         self.syncing_features = True
         profile_enabled = self.profile_feature_enabled()
-        hover_enabled = self.hover_feature_enabled()
         self.profile_switch.set_active(profile_enabled)
-        self.hover_switch.set_active(hover_enabled)
         if hasattr(self, "clipboard_autostart_check"):
             self.clipboard_autostart_check.set_active(self.clipboard_autostart_active())
             self.clipboard_shortcut_check.set_active(self.clipboard_shortcut_active())
@@ -1949,11 +1930,6 @@ class App(Gtk.ApplicationWindow):
                 self.chrome_status_pills["icons"],
                 "on" if profile_enabled else "off",
                 "ok" if profile_enabled else "warn",
-            )
-            self.set_pill(
-                self.chrome_status_pills["hover"],
-                "on" if hover_enabled else "off",
-                "ok" if hover_enabled else "warn",
             )
         if hasattr(self, "chrome_restore_button"):
             self.chrome_restore_button.set_visible(False)
@@ -2019,10 +1995,6 @@ class App(Gtk.ApplicationWindow):
         except Exception:
             chrome_ready = False
         try:
-            hover_ready = self.hover_feature_enabled()
-        except Exception:
-            hover_ready = False
-        try:
             mouse_installed = self.mouse_service.isMaccelInstalled()
             mouse_detected = self.mouse_service.getDetectedPresetState()
         except Exception:
@@ -2041,7 +2013,7 @@ class App(Gtk.ApplicationWindow):
         except Exception:
             dock_layout = "Unavailable"
         try:
-            module_summary = self.extension_module_summary()
+            module_summary = self.extension_summary()
             module_level = "ok" if module_summary.startswith(str(len(self.extension_modules)) + "/") else "warn"
         except Exception:
             module_summary = "Unavailable"
@@ -2049,13 +2021,12 @@ class App(Gtk.ApplicationWindow):
 
         pills = [
             ("Chrome Profiles: On" if chrome_ready else "Chrome Profiles: Setup", "ok" if chrome_ready else "warn"),
-            ("Hover Previews: On" if hover_ready else "Hover Previews: Off", "ok" if hover_ready else "warn"),
             (
                 f"Mouse: {self.mouse_preset_label(mouse_detected)}" if mouse_installed else "Mouse: maccel missing",
                 "ok" if mouse_installed and mouse_detected not in {"unknown", "default_ubuntu"} else ("warn" if mouse_installed else "err"),
             ),
             ("Clipboard: On" if clipboard_ready else "Clipboard: Off", "ok" if clipboard_ready else "warn"),
-            (f"Modules: {module_summary}", module_level),
+            (f"GNOME Extensions: {module_summary}", module_level),
         ]
         for text, level in pills:
             self.overview_summary_box.add(self.make_pill(text, level))
@@ -3408,38 +3379,11 @@ class App(Gtk.ApplicationWindow):
             return
         for state in self.extension_modules.values():
             self.refresh_extension_module(state)
+        self.refresh_overview_summary()
 
-        installed_count = 0
-        enabled_count = 0
-        configurable_count = 0
-        for state in self.extension_modules.values():
-            if self.extension_installed(state["uuid"]):
-                installed_count += 1
-                if self.extension_enabled(state["uuid"]):
-                    enabled_count += 1
-                if state.get("settings") is not None:
-                    configurable_count += 1
-        if hasattr(self, "extension_status_pills"):
-            total = len(self.extension_modules)
-            self.set_pill(
-                self.extension_status_pills["installed"],
-                f"{installed_count}/{total}",
-                "ok" if installed_count else "warn",
-            )
-            self.set_pill(
-                self.extension_status_pills["enabled"],
-                f"{enabled_count}/{total}",
-                "ok" if enabled_count else "warn",
-            )
-            self.set_pill(
-                self.extension_status_pills["configurable"],
-                f"{configurable_count}/{total}",
-                "ok" if configurable_count else "warn",
-            )
-
-    def extension_module_summary(self):
+    def extension_summary(self):
         if not self.extension_modules:
-            return "No modules installed"
+            return "No GNOME extensions installed"
         enabled = sum(1 for state in self.extension_modules.values() if self.extension_enabled(state["uuid"]))
         return f"{enabled}/{len(self.extension_modules)} enabled"
 

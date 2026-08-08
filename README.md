@@ -31,7 +31,7 @@ The app gives you a guided tabbed GUI with:
 - One-click pinning to Ubuntu Dock.
 - A Windows taskbar-style dock layout toggle with original-layout restore.
 - Dock click style choices.
-- A Modules tab where ArcMenu, Bluetooth Battery Meter, and Dash to Panel are managed as independent modules with install, enable/disable, reset, and inline GSettings controls.
+- Dedicated ArcMenu, Bluetooth Battery Meter, and Dash to Panel tabs with independent install, enable/disable, reset, and inline GSettings controls.
 - A Clipboard tab with CopyQ clipboard history toggle and `Super+V` binding.
 - A Mouse Movement tab with install status, maccel installer progress, Windows, macOS, and Restore Original buttons.
 
@@ -51,25 +51,16 @@ The old `chrome-dock-profiles` command is still installed as a compatibility ali
   - Minimize + Previews
   - Preview Picker
   - Cycle Windows
-- Installs a local hover-preview extension for GNOME 42-44 and GNOME 45+ shells.
 
-## GNOME Modules
+## GNOME Extensions
 
-The **Modules** tab treats essential GNOME extensions as configurable features rather than install-only downloads. Each module shows whether it is installed and enabled, can be turned on or off independently, and exposes its common settings directly in Linux Toolbox. Additional simple settings are available under **Advanced settings**; complex preferences remain available through the module's full GNOME preferences window.
+Each essential GNOME extension has its own top-level tab rather than being grouped into an install-only list. Every tab shows whether the extension is installed and enabled, lets you turn it on or off independently, and exposes common settings directly in Linux Toolbox. Additional simple settings are available under **Advanced settings**; complex preferences remain available through the extension's full GNOME preferences window.
 
-The initial modules are:
+The initial extensions are:
 
 - **ArcMenu** — menu layout, panel position, button appearance, icon size, default view, and display options.
 - **Bluetooth Battery Meter** — quick settings display, panel indicator style, hover behavior, tooltip, and sizing.
 - **Dash to Panel** — panel position/size, intellihide, previews, app grouping, multi-monitor behavior, and click/scroll actions.
-
-After installing hover previews, Linux Toolbox asks GNOME Shell to reload the extension when possible. If previews do not appear immediately, restart GNOME Shell:
-
-```text
-Alt+F2, type r, press Enter
-```
-
-On Wayland, log out and back in instead.
 
 ## Clipboard History
 
