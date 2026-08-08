@@ -119,6 +119,12 @@ headerbar.app-header {
     color: #b42318;
 }
 
+.pill-neutral {
+    background-color: #eef2f7;
+    border-color: #d8dee9;
+    color: #526071;
+}
+
 .data-grid {
     background-color: #ffffff;
 }

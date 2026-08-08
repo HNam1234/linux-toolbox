@@ -56,13 +56,25 @@ The old `chrome-dock-profiles` command is still installed as a compatibility ali
 
 ## GNOME Extensions
 
-Each essential GNOME extension has its own top-level tab rather than being grouped into an install-only list. Every tab shows whether the extension is installed and enabled, lets you turn it on or off independently, and exposes common settings directly in Linux Toolbox. Additional simple settings are available under **Advanced settings**; complex preferences remain available through the extension's full GNOME preferences window.
+Each essential GNOME extension has its own top-level tab and one lifecycle
+toggle. Turning a module on automatically installs Extension Manager when it
+is missing, downloads the compatible extension release, enables user
+extensions, and activates the module. Turning it off disables the module but
+keeps its files installed, so enabling it again is immediate.
+
+The preferred install path uses GNOME Shell's own D-Bus extension API—the same
+interface used by Extension Manager. If that is unavailable, Linux Toolbox
+downloads the compatible bundle from extensions.gnome.org and installs it with
+`gnome-extensions`. The desired toggle state is stored in Linux Toolbox and is
+repaired the next time the app starts if an extension was removed or disabled
+outside the app. A newly installed extension that GNOME cannot hot-load is
+queued for the next login automatically.
 
 The initial extensions are:
 
-- **ArcMenu** — menu layout, panel position, button appearance, icon size, default view, and display options.
-- **Bluetooth Battery Meter** — quick settings display, panel indicator style, hover behavior, tooltip, and sizing.
-- **Dash to Panel** — panel position/size, intellihide, previews, app grouping, multi-monitor behavior, and click/scroll actions.
+- **ArcMenu** — familiar application menu.
+- **Bluetooth Battery Meter** — Bluetooth battery levels in the panel and quick settings.
+- **Dash to Panel** — combined GNOME panel and application taskbar.
 
 ## Clipboard History
 
