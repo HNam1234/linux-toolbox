@@ -51,3 +51,6 @@ the system Go installation. Missing Ubuntu packages are installed through `pkexe
 To keep desktop machines responsive, builds run with one Cargo/Go job by
 default and stop before building if less than 4 GiB of RAM plus free swap is
 available. Advanced users can raise the limit with `COCKPIT_FORK_BUILD_JOBS`.
+Linux Toolbox builds only the Debian package and disables Tauri updater-artifact
+signing: package updates remain handled by **Rebuild / Update Fork** or
+**Reapply Fork Patch**.

@@ -12,7 +12,7 @@ readonly FORK_REPOSITORY="https://github.com/HNam1234/cockpit-tools-linux-codex.
 readonly FORK_BRANCH="${COCKPIT_FORK_BRANCH:-linux-codex-desktop-support}"
 readonly UPSTREAM_REPOSITORY="${COCKPIT_UPSTREAM_REPOSITORY:-https://github.com/jlcodes99/cockpit-tools.git}"
 readonly UPSTREAM_BRANCH="${COCKPIT_UPSTREAM_BRANCH:-main}"
-readonly PATCH_SET="codex-linux-desktop-v1+fork-endpoints-v1"
+readonly PATCH_SET="codex-linux-desktop-v1+fork-endpoints-v1+debian-bundle-v1"
 readonly PACKAGE_NAME="cockpit-tools"
 readonly PACKAGE_BINARY="/usr/bin/cockpit-tools"
 readonly DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -382,6 +382,13 @@ for relative in (
 config_path = root / "src-tauri/tauri.conf.json"
 if config_path.exists():
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    bundle = config.setdefault("bundle", {})
+    # Linux Toolbox installs only the Debian artifact. Building every Linux
+    # bundle downloads AppImage tooling and, with updater artifacts enabled,
+    # requires the fork's private Tauri signing key even though no updater
+    # artifact is used by this installer.
+    bundle["targets"] = ["deb"]
+    bundle["createUpdaterArtifacts"] = False
     updater = config.setdefault("plugins", {}).setdefault("updater", {})
     updater["endpoints"] = [
         f"{fork_repo}/releases/latest/download/latest-{{{{target}}}}.json",
