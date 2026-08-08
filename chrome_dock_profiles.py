@@ -937,8 +937,6 @@ class App(Gtk.ApplicationWindow):
                 ("chrome", "Chrome", "Remove profile launchers and hover previews.", self.on_chrome_restore_original),
                 ("mouse", "Mouse", "Restore original maccel mouse settings.", self.on_mouse_restore),
                 ("clipboard", "Clipboard", "Restore original clipboard startup and shortcuts.", self.on_clipboard_restore_original),
-                ("dock_layout", "Dock Layout", "Restore original dock layout.", self.on_dock_restore_layout),
-                ("dock_style", "Dock Click", "Restore original dock click behavior.", self.on_dock_restore_style),
             )
         ):
             button = Gtk.Button(label=title)
@@ -1336,9 +1334,6 @@ class App(Gtk.ApplicationWindow):
         clipboard_setup_card.pack_start(self.clipboard_status_label, False, False, 0)
 
         self.refresh_compatibility()
-        self.refresh_compatibility()
-        self.refresh_current_style()
-        self.refresh_dock_layout_state()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
@@ -1699,11 +1694,6 @@ class App(Gtk.ApplicationWindow):
                 "ok" if mouse_installed and mouse_detected not in {"unknown", "default_ubuntu"} else ("warn" if mouse_installed else "err"),
             ),
             ("Clipboard: On" if clipboard_ready else "Clipboard: Off", "ok" if clipboard_ready else "warn"),
-            (f"Dock: {style_action or 'unknown'}", "ok" if style_action else "warn"),
-            (
-                f"Dock Layout: {dock_layout}",
-                "ok" if dock_layout == "Windows taskbar" else ("err" if dock_layout == "Unavailable" else "warn"),
-            ),
         ]
         for text, level in pills:
             self.overview_summary_box.add(self.make_pill(text, level))
@@ -1735,21 +1725,10 @@ class App(Gtk.ApplicationWindow):
         except Exception:
             clipboard_needed = False
 
-        try:
-            dock_layout_needed = self.dock_layout_restore_available()
-        except Exception:
-            dock_layout_needed = False
-        try:
-            dock_style_needed = self.dock_style_restore_available()
-        except Exception:
-            dock_style_needed = False
-
         states = {
             "chrome": (chrome_needed, chrome_needed),
             "mouse": (mouse_needed, mouse_ready),
             "clipboard": (clipboard_needed, clipboard_needed),
-            "dock_layout": (dock_layout_needed, dock_layout_needed),
-            "dock_style": (dock_style_needed, dock_style_needed),
         }
         for key, (visible, sensitive) in states.items():
             button = self.overview_restore_buttons[key]
