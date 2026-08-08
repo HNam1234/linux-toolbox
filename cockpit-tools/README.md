@@ -47,3 +47,7 @@ The installer downloads a checksum-verified private Go 1.26.5 toolchain into
 its cache when the system Go is too old (x86_64 and arm64); it does not replace
 the system Go installation. Missing Ubuntu packages are installed through `pkexec` unless
 `COCKPIT_FORK_SKIP_APT=1` is set.
+
+To keep desktop machines responsive, builds run with one Cargo/Go job by
+default and stop before building if less than 4 GiB of RAM plus free swap is
+available. Advanced users can raise the limit with `COCKPIT_FORK_BUILD_JOBS`.

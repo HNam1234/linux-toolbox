@@ -295,6 +295,31 @@ ensure_go_toolchain() {
   log "Using Linux Toolbox Go toolchain: $($GO_BOOTSTRAP_ROOT/bin/go version)"
 }
 
+ensure_safe_build_resources() {
+  local available_kib swap_free_kib total_available_kib
+  if [ ! -r /proc/meminfo ]; then
+    log "Could not inspect available memory; using the conservative single-job build profile."
+    return 0
+  fi
+
+  available_kib="$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)"
+  swap_free_kib="$(awk '/^SwapFree:/ { print $2; exit }' /proc/meminfo)"
+  available_kib="${available_kib:-0}"
+  swap_free_kib="${swap_free_kib:-0}"
+  total_available_kib=$((available_kib + swap_free_kib))
+  if [ "$total_available_kib" -lt $((4 * 1024 * 1024)) ]; then
+    die "Cockpit Tools source build needs at least 4 GiB of currently available RAM plus swap; only $((total_available_kib / 1024)) MiB is available. Close memory-heavy apps and retry."
+  fi
+  log "Build memory preflight passed: $((available_kib / 1024)) MiB RAM and $((swap_free_kib / 1024)) MiB swap available."
+}
+
+safe_build_jobs() {
+  local requested_jobs="${COCKPIT_FORK_BUILD_JOBS:-1}"
+  [[ "$requested_jobs" =~ ^[1-9][0-9]*$ ]] \
+    || die "COCKPIT_FORK_BUILD_JOBS must be a positive integer (default: 1)."
+  printf '%s\n' "$requested_jobs"
+}
+
 prepare_source() {
   mkdir -p "$BUILD_ROOT"
   local source_ref="$UPSTREAM_BRANCH"
@@ -430,6 +455,7 @@ build_deb() {
   ensure_toolchain
   ensure_apt_build_dependencies
   ensure_go_toolchain
+  ensure_safe_build_resources
   prepare_source
   apply_linux_codex_patch
   patch_fork_endpoints
@@ -441,9 +467,14 @@ build_deb() {
     npm ci --no-audit --no-fund
   )
 
-  log "Building the patched Linux .deb package. This can take several minutes."
+  local build_jobs
+  build_jobs="$(safe_build_jobs)"
+  log "Building the patched Linux .deb package with a safe $build_jobs-job limit. This can take several minutes."
   (
     cd "$SOURCE_DIR"
+    export CARGO_BUILD_JOBS="$build_jobs"
+    export GOMAXPROCS="$build_jobs"
+    export GOFLAGS="-p=$build_jobs"
     npx tauri build --ci
   )
 
