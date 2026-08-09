@@ -418,32 +418,87 @@ class GnomeExtensionService:
             raise ExtensionOperationError(f"{uuid} was not detected after installation.")
         return source
 
+    def _shell_errors(self, uuid):
+        """Return the useful part of GNOME Shell's current error report."""
+        try:
+            completed = self._dbus_call("GetExtensionErrors", uuid, timeout=30)
+        except ExtensionOperationError:
+            return ""
+        if completed.returncode != 0:
+            return ""
+        text = (completed.stdout or "").strip()
+        return text[:1200] if text and text not in ("(@as [],)", "([],)") else ""
+
+    def _call_shell_enablement(self, uuid, enabled, errors):
+        method = "EnableExtension" if enabled else "DisableExtension"
+        try:
+            completed = self._dbus_call(method, uuid, timeout=60)
+        except ExtensionOperationError as error:
+            errors.append(str(error))
+            return
+        if completed.returncode != 0:
+            errors.append(self._command_error(completed, f"GNOME Shell {method} failed"))
+
+    def _call_cli_enablement(self, uuid, enabled, errors):
+        if not shutil.which("gnome-extensions"):
+            return
+        action = "enable" if enabled else "disable"
+        completed = self._run(["gnome-extensions", action, uuid], timeout=60)
+        if completed.returncode != 0:
+            errors.append(self._command_error(completed, f"gnome-extensions {action} failed"))
+
+    def _activate_now(self, uuid, errors):
+        """Ask the running Shell to reload an extension, then enable it again."""
+        try:
+            reloaded = self._dbus_call("ReloadExtension", uuid, timeout=60)
+            if reloaded.returncode != 0:
+                errors.append(self._command_error(reloaded, "GNOME Shell reload failed"))
+        except ExtensionOperationError as error:
+            errors.append(str(error))
+        self._call_shell_enablement(uuid, True, errors)
+        self._call_cli_enablement(uuid, True, errors)
+
     def set_enabled(self, uuid, enabled):
         if enabled and not self.installed(uuid):
             raise ExtensionOperationError(f"{uuid} is not installed.")
         if enabled:
             self._allow_user_extensions()
         self._set_enabled_preference(uuid, enabled)
-
-        method = "EnableExtension" if enabled else "DisableExtension"
-        try:
-            completed = self._dbus_call(method, uuid, timeout=60)
-            if completed.returncode != 0 and enabled:
-                self._dbus_call("ReloadExtension", uuid, timeout=60)
-                self._dbus_call(method, uuid, timeout=60)
-        except ExtensionOperationError:
-            pass
-
-        if shutil.which("gnome-extensions"):
-            action = "enable" if enabled else "disable"
-            self._run(["gnome-extensions", action, uuid], timeout=60)
+        errors = []
+        self._call_shell_enablement(uuid, enabled, errors)
+        self._call_cli_enablement(uuid, enabled, errors)
         self._set_enabled_preference(uuid, enabled)
-        active = self.active(uuid) if enabled else False
-        return {
-            "enabled": self.enabled(uuid),
-            "active": active,
-            "restartRequired": enabled and not active,
-        }
+
+        if enabled:
+            # A newly downloaded extension occasionally needs an explicit
+            # reload before GNOME creates it in the current Shell process.
+            for _attempt in range(3):
+                if self.active(uuid):
+                    return {"enabled": True, "active": True, "restartRequired": False}
+                self._activate_now(uuid, errors)
+                self._set_enabled_preference(uuid, True)
+                time.sleep(0.5)
+            shell_errors = self._shell_errors(uuid)
+            detail = "; ".join(item for item in errors if item)
+            if shell_errors:
+                detail = f"{detail}; GNOME Shell: {shell_errors}" if detail else f"GNOME Shell: {shell_errors}"
+            raise ExtensionOperationError(
+                f"{uuid} did not become active in the current GNOME session"
+                + (f": {detail}" if detail else ".")
+            )
+
+        for _attempt in range(3):
+            if not self.enabled(uuid) and not self.active(uuid):
+                return {"enabled": False, "active": False, "restartRequired": False}
+            self._call_shell_enablement(uuid, False, errors)
+            self._call_cli_enablement(uuid, False, errors)
+            self._set_enabled_preference(uuid, False)
+            time.sleep(0.5)
+        detail = "; ".join(item for item in errors if item)
+        raise ExtensionOperationError(
+            f"{uuid} did not turn off in the current GNOME session"
+            + (f": {detail}" if detail else ".")
+        )
 
     def ensure_enabled(self, uuid):
         warnings = []

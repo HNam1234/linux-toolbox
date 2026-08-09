@@ -15,6 +15,11 @@ from linux_toolbox.gnome_extensions import (
 
 
 TEST_UUID = "linux-toolbox-test@example.com"
+MANAGED_EXTENSION_UUIDS = (
+    "arcmenu@arcmenu.com",
+    "Bluetooth-Battery-Meter@maniacx.github.com",
+    "dash-to-panel@jderose9.github.com",
+)
 
 
 def extension_bundle(uuid=TEST_UUID, extra_entries=None):
@@ -152,6 +157,79 @@ class OrchestrationTests(unittest.TestCase):
             ["pkexec", "apt-get", "install", "-y", "gnome-shell-extension-manager"],
             service.commands,
         )
+
+    def test_enable_reloads_each_managed_extension_until_active(self):
+        class ImmediateActivationService(GnomeExtensionService):
+            def __init__(self):
+                super().__init__()
+                self.current_enabled = False
+                self.current_active = False
+                self.reloads = []
+
+            def installed(self, uuid):
+                return True
+
+            def _allow_user_extensions(self):
+                return None
+
+            def _set_enabled_preference(self, uuid, enabled):
+                self.current_enabled = enabled
+
+            def enabled(self, uuid):
+                return self.current_enabled
+
+            def active(self, uuid):
+                return self.current_active
+
+            def _call_shell_enablement(self, uuid, enabled, errors):
+                return None
+
+            def _call_cli_enablement(self, uuid, enabled, errors):
+                return None
+
+            def _activate_now(self, uuid, errors):
+                self.reloads.append(uuid)
+                self.current_active = True
+
+        for uuid in MANAGED_EXTENSION_UUIDS:
+            service = ImmediateActivationService()
+            with mock.patch("linux_toolbox.gnome_extensions.time.sleep"):
+                result = service.set_enabled(uuid, True)
+            self.assertEqual(service.reloads, [uuid])
+            self.assertTrue(result["enabled"])
+            self.assertTrue(result["active"])
+            self.assertFalse(result["restartRequired"])
+
+    def test_disable_each_managed_extension_is_verified_immediately(self):
+        class ImmediateDisableService(GnomeExtensionService):
+            def __init__(self):
+                super().__init__()
+                self.current_enabled = True
+                self.current_active = True
+
+            def _set_enabled_preference(self, uuid, enabled):
+                self.current_enabled = enabled
+
+            def enabled(self, uuid):
+                return self.current_enabled
+
+            def active(self, uuid):
+                return self.current_active
+
+            def _call_shell_enablement(self, uuid, enabled, errors):
+                if not enabled:
+                    self.current_active = False
+
+            def _call_cli_enablement(self, uuid, enabled, errors):
+                return None
+
+        for uuid in MANAGED_EXTENSION_UUIDS:
+            service = ImmediateDisableService()
+            with mock.patch("linux_toolbox.gnome_extensions.time.sleep"):
+                result = service.set_enabled(uuid, False)
+            self.assertFalse(result["enabled"])
+            self.assertFalse(result["active"])
+            self.assertFalse(result["restartRequired"])
 
 
 if __name__ == "__main__":

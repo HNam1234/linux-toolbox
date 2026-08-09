@@ -1648,7 +1648,7 @@ class App(Gtk.ApplicationWindow):
         automation_hint = Gtk.Label(
             label=(
                 "One toggle handles everything: dependency setup, compatible extension download, "
-                "enablement, and future repair. Turning it off keeps the files installed for a fast restart."
+                "immediate activation, and future repair. Turning it off keeps the files installed for a fast restart."
             )
         )
         automation_hint.set_xalign(0)
@@ -1731,10 +1731,7 @@ class App(Gtk.ApplicationWindow):
             )
         elif enabled:
             warnings = result.get("warnings", []) if isinstance(result, dict) else []
-            if result and result.get("restartRequired"):
-                message = f"{name} installed and enabled for the next GNOME login."
-            else:
-                message = f"{name} installed, enabled, and active."
+            message = f"{name} installed, enabled, and active in this GNOME session."
             if warnings:
                 message += " Extension Manager setup warning: " + "; ".join(warnings)
             self.log(message)
@@ -3315,7 +3312,7 @@ class App(Gtk.ApplicationWindow):
         elif active:
             self.set_pill(state["status"], "On · Active", "ok")
         elif enabled:
-            self.set_pill(state["status"], "On · Next login", "warn")
+            self.set_pill(state["status"], "On · Activating…", "warn")
         elif desired is True:
             self.set_pill(state["status"], "On · Repair queued", "warn")
         elif installed:
