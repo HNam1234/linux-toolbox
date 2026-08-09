@@ -1,23 +1,19 @@
-# Cockpit Tools Codex patch installer
+# Cockpit Tools Codex fork installer
 
-This installer builds and installs the Linux Codex patch from:
+Linux Toolbox installs the prebuilt Debian package from:
 
-<https://github.com/HNam1234/cockpit-tools-linux-codex>
+<https://github.com/HNam1234/cockpit-tools-linux-codex/releases>
 
-It is also available inside the Linux Toolbox GUI under **Cockpit Fork**.
+It does not build Rust, Go, Node.js, or Tauri on the client machine.
 
 ```bash
 ./install.sh install --stop-running
 ```
 
-The installer fetches the upstream Cockpit Tools source, applies the Linux
-Codex Desktop switching patch from the fork's
-`linux-codex-desktop-support` branch, and validates the `.deb` before touching an existing
-`cockpit-tools` package. If the official package is installed, it removes only
-the package and installs the patched build; it does not purge Cockpit
-account/config data. The installer writes a marker under
-`~/.local/share/linux-toolbox/cockpit-tools-fork.json` so Linux Toolbox can
-distinguish its managed fork from an official or manually installed package.
+The installer downloads `cockpit-tools-linux-amd64.deb` and its release
+checksum, verifies both the checksum and Debian metadata, then removes any
+installed `cockpit-tools` package without purging user data and installs the
+fork. Cockpit account/config data is kept.
 
 Useful commands:
 
@@ -27,30 +23,12 @@ Useful commands:
 ./install.sh uninstall --stop-running
 ```
 
-From the Linux Toolbox repository root, the shorter command below is also
-supported and dispatches to this installer:
+From the Linux Toolbox repository root, this also installs or updates the
+fork:
 
 ```bash
 ./install.sh patch --stop-running
 ```
 
-Use `repair` (or its `patch` alias) when an official Cockpit update has
-replaced the patched package. It reapplies the Codex patch to the current
-upstream source and only replaces the installed package after the build
-succeeds. If an upstream source change no longer matches the patch anchors,
-the operation stops without changing the currently installed package.
-
-`uninstall` removes only a fork previously marked as managed by Linux Toolbox.
-It refuses to remove an official/unknown installation. The source build needs
-Node.js 18+, npm 9+, Rust/Cargo, Git, and Ubuntu/Debian build libraries.
-The installer downloads a checksum-verified private Go 1.26.5 toolchain into
-its cache when the system Go is too old (x86_64 and arm64); it does not replace
-the system Go installation. Missing Ubuntu packages are installed through `pkexec` unless
-`COCKPIT_FORK_SKIP_APT=1` is set.
-
-To keep desktop machines responsive, builds run with one Cargo/Go job by
-default and stop before building if less than 4 GiB of RAM plus free swap is
-available. Advanced users can raise the limit with `COCKPIT_FORK_BUILD_JOBS`.
-Linux Toolbox builds only the Debian package and disables Tauri updater-artifact
-signing: package updates remain handled by **Rebuild / Update Fork** or
-**Reapply Fork Patch**.
+`uninstall` removes only a fork marked as installed by Linux Toolbox. It
+refuses to remove an official or unknown Cockpit Tools package.

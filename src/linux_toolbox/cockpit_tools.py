@@ -1,10 +1,4 @@
-"""Cockpit Tools fork detection and installer orchestration.
-
-The fork currently does not publish Linux release assets, so Linux Toolbox
-ships a small source-build installer.  This module keeps the GTK application
-focused on status and process handling while the shell script owns the
-privileged package operations.
-"""
+"""Cockpit Tools fork detection and release-package installation."""
 
 import hashlib
 import json

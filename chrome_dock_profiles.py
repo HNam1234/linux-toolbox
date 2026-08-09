@@ -1343,8 +1343,8 @@ class App(Gtk.ApplicationWindow):
 
         cockpit_description = Gtk.Label(
             label=(
-                "Build the upstream Cockpit Tools source with the Codex patch, then install it; "
-                "reapply the patch after an official update if needed."
+                "Download the verified Cockpit Tools Codex fork package and install it. "
+                "An official Cockpit Tools package is replaced while account data stays intact."
             )
         )
         cockpit_description.set_xalign(0)
@@ -1369,7 +1369,7 @@ class App(Gtk.ApplicationWindow):
 
         cockpit_setup_card = self.create_card(
             "Setup Flow",
-            "The installer builds and validates a patched .deb locally before changing the installed package.",
+            "The installer verifies the fork release, then replaces only the Cockpit Tools package.",
         )
         cockpit_tab.pack_start(cockpit_setup_card, False, False, 0)
 
@@ -1377,8 +1377,8 @@ class App(Gtk.ApplicationWindow):
         cockpit_setup_card.pack_start(cockpit_actions, False, False, 0)
 
         self.cockpit_install_button = self.create_primary_button(
-            "Install / Reapply Fork Patch",
-            "Build upstream Cockpit Tools with the Codex patch, then install the validated .deb.",
+            "Install / Update Fork",
+            "Download the verified Cockpit Tools Codex fork package and install it.",
         )
         self.cockpit_install_button.set_no_show_all(False)
         self.cockpit_install_button.connect("clicked", self.on_cockpit_install)
@@ -1428,7 +1428,7 @@ class App(Gtk.ApplicationWindow):
         cockpit_safety_label = Gtk.Label(
             label=(
                 "The replacement removes only the system package and keeps Cockpit account/config data. "
-                "Linux Toolbox applies the local patch and validates the new .deb before touching an existing installation. "
+                "Linux Toolbox verifies the downloaded fork package before touching an existing installation. "
                 "If Cockpit is open, close it first or confirm the installer may request a clean shutdown."
             )
         )
@@ -2199,9 +2199,9 @@ class App(Gtk.ApplicationWindow):
 
         self.cockpit_install_button.set_sensitive(status["supported"] and not install_running)
         if status["managedFork"]:
-            install_label = "Rebuild / Update Fork"
+            install_label = "Update Fork"
         elif package_installed:
-            install_label = "Reapply Fork Patch"
+            install_label = "Replace with Fork"
         else:
             install_label = "Install Fork"
         self.cockpit_install_button.set_label(install_label)
@@ -2222,9 +2222,9 @@ class App(Gtk.ApplicationWindow):
         elif status["managedFork"]:
             lines.append("Linux Toolbox-managed Cockpit Tools Codex fork is installed.")
         elif package_installed:
-            lines.append("An official or changed Cockpit Tools package is installed; Reapply Fork Patch will rebuild it from upstream source.")
+            lines.append("An official or changed Cockpit Tools package is installed; Replace with Fork will download and install the verified fork package.")
         else:
-            lines.append("Cockpit Tools is not installed. Install Fork will build the patched package from source.")
+            lines.append("Cockpit Tools is not installed. Install Fork will download and install the verified fork package.")
         if running:
             lines.append("Cockpit Tools is open. The installer will ask before requesting a clean shutdown.")
         lines.append(f"Installer log: {status['installLogPath']}")
@@ -2971,24 +2971,23 @@ class App(Gtk.ApplicationWindow):
     def confirm_cockpit_operation(self, action, status):
         if action in ("install", "repair"):
             if status["managedFork"]:
-                title = "Rebuild Cockpit Tools fork?"
+                title = "Update Cockpit Tools fork?"
                 detail = (
-                    "Linux Toolbox will fetch the current upstream source, apply the Codex patch, "
-                    "remove the managed package, and install the new validated .deb. "
+                    "Linux Toolbox will download the verified fork package, "
+                    "remove the managed package, and install the new .deb. "
                     "Account/config data will be kept."
                 )
             elif action == "repair":
-                title = "Reapply Cockpit Tools patch?"
+                title = "Replace Cockpit Tools with the fork?"
                 detail = (
                     "An official or changed cockpit-tools package is installed. Linux Toolbox will "
-                    "fetch the installed version's upstream source, apply the Codex patch, build and validate it, "
-                    "then replace the package. Account/config data will be kept."
+                    "download and verify the fork package, then replace the package. Account/config data will be kept."
                 )
             else:
-                title = "Install patched Cockpit Tools?"
+                title = "Install Cockpit Tools fork?"
                 detail = (
-                    "Linux Toolbox will build upstream Cockpit Tools with the Codex patch first, "
-                    "then install the validated package. Account/config data will be kept."
+                    "Linux Toolbox will download and verify the fork package, "
+                    "then install it. Account/config data will be kept."
                 )
         else:
             title = "Remove managed Cockpit Tools fork?"
@@ -3018,13 +3017,13 @@ class App(Gtk.ApplicationWindow):
         try:
             if action == "install":
                 self.log(
-                    "Building upstream Cockpit Tools with the Codex patch. "
-                    "The current package will not be changed until the build succeeds."
+                    "Downloading and verifying the Cockpit Tools Codex fork package. "
+                    "The current package will not be changed until verification succeeds."
                 )
             elif action == "repair":
                 self.log(
-                    "Reapplying the Codex patch after the current package update. "
-                    "The current package will not be changed until the build succeeds."
+                    "Replacing the current Cockpit Tools package with the verified Codex fork. "
+                    "The current package will not be changed until verification succeeds."
                 )
             else:
                 self.log("Removing the Linux Toolbox-managed Cockpit Tools fork.")
