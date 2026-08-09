@@ -127,15 +127,30 @@ download_release_package() {
   require_command sha256sum
   require_command dpkg-deb
 
-  local asset_name package_path checksum_path expected_hash actual_hash
+  local asset_name package_path checksum_path expected_hash actual_hash cache_bust
   asset_name="$(release_asset_name)"
   package_path="$(mktemp "$BUILD_ROOT/$asset_name.XXXXXX")"
   checksum_path="$(mktemp "$BUILD_ROOT/SHA256SUMS.txt.XXXXXX")"
+  cache_bust="$(date +%s%N)"
 
   log "Downloading prebuilt Cockpit Tools Codex fork package."
-  curl --fail --location --retry 3 --output "$package_path" "$RELEASE_BASE_URL/$asset_name"
-  curl --fail --location --retry 3 --output "$checksum_path" "$RELEASE_BASE_URL/SHA256SUMS.txt"
-  expected_hash="$(awk -v asset="$asset_name" '$2 == asset { print $1; exit }' "$checksum_path")"
+  # GitHub release assets are cached aggressively. The unique query keeps a
+  # replacement checksum asset from being paired with a stale CDN response.
+  curl --fail --location --retry 3 --output "$package_path" "$RELEASE_BASE_URL/$asset_name?cache=$cache_bust"
+  curl --fail --location --retry 3 --output "$checksum_path" "$RELEASE_BASE_URL/SHA256SUMS.txt?cache=$cache_bust"
+  # Accept the usual SHA256SUMS forms: a bare filename, an optional leading
+  # asterisk (binary-mode output), or a path produced by sha256sum.
+  expected_hash="$(awk -v asset="$asset_name" '
+    {
+      filename = $2
+      sub(/^\\*/, "", filename)
+      sub(/^.*\//, "", filename)
+      if (filename == asset) {
+        print $1
+        exit
+      }
+    }
+  ' "$checksum_path")"
   [[ "$expected_hash" =~ ^[a-fA-F0-9]{64}$ ]] \
     || die "Release checksum file does not contain a SHA256 for $asset_name."
   actual_hash="$(sha256sum "$package_path" | cut -d' ' -f1)"
