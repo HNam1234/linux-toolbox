@@ -1343,8 +1343,8 @@ class App(Gtk.ApplicationWindow):
 
         cockpit_description = Gtk.Label(
             label=(
-                "Download the verified Cockpit Tools Codex fork package and install it. "
-                "An official Cockpit Tools package is replaced while account data stays intact."
+                "Use the button below to install or update the verified Cockpit Tools Codex fork. "
+                "Linux Toolbox handles the download and replacement for you; no terminal is needed."
             )
         )
         cockpit_description.set_xalign(0)
@@ -1368,8 +1368,8 @@ class App(Gtk.ApplicationWindow):
         )
 
         cockpit_setup_card = self.create_card(
-            "Setup Flow",
-            "The installer verifies the fork release, then replaces only the Cockpit Tools package.",
+            "One-click setup",
+            "Linux Toolbox verifies the fork package, closes Cockpit Tools if needed, and replaces only its package.",
         )
         cockpit_tab.pack_start(cockpit_setup_card, False, False, 0)
 
@@ -1377,8 +1377,8 @@ class App(Gtk.ApplicationWindow):
         cockpit_setup_card.pack_start(cockpit_actions, False, False, 0)
 
         self.cockpit_install_button = self.create_primary_button(
-            "Install / Update Fork",
-            "Download the verified Cockpit Tools Codex fork package and install it.",
+            "Install / Update Cockpit Fork",
+            "Download, verify, and install the Cockpit Tools Codex fork without using a terminal.",
         )
         self.cockpit_install_button.set_no_show_all(False)
         self.cockpit_install_button.connect("clicked", self.on_cockpit_install)
@@ -1429,7 +1429,7 @@ class App(Gtk.ApplicationWindow):
             label=(
                 "The replacement removes only the system package and keeps Cockpit account/config data. "
                 "Linux Toolbox verifies the downloaded fork package before touching an existing installation. "
-                "If Cockpit is open, close it first or confirm the installer may request a clean shutdown."
+                "If Cockpit is open, Linux Toolbox closes it first. A graphical system-password prompt appears only when Ubuntu needs permission."
             )
         )
         cockpit_safety_label.set_xalign(0)
@@ -2222,11 +2222,12 @@ class App(Gtk.ApplicationWindow):
         elif status["managedFork"]:
             lines.append("Linux Toolbox-managed Cockpit Tools Codex fork is installed.")
         elif package_installed:
-            lines.append("An official or changed Cockpit Tools package is installed; Replace with Fork will download and install the verified fork package.")
+            lines.append("An official or changed Cockpit Tools package is installed. Click Replace with Fork; Linux Toolbox handles the replacement here.")
         else:
-            lines.append("Cockpit Tools is not installed. Install Fork will download and install the verified fork package.")
+            lines.append("Cockpit Tools is not installed. Click Install Fork to set it up here.")
         if running:
-            lines.append("Cockpit Tools is open. The installer will ask before requesting a clean shutdown.")
+            lines.append("Cockpit Tools is open. Linux Toolbox will close it automatically before updating.")
+        lines.append("No terminal command is required. Ubuntu may show a graphical password prompt for the package change.")
         lines.append(f"Installer log: {status['installLogPath']}")
         self.cockpit_status_label.set_text("\n".join(lines))
         self.refresh_cockpit_install_log_view()
@@ -2944,13 +2945,11 @@ class App(Gtk.ApplicationWindow):
             self.log("Cockpit fork installation requires a Debian/Ubuntu-style Linux system with dpkg.")
             return
 
-        operation = "repair" if status["packageInstalled"] and not status["managedFork"] else "install"
-        stop_running = status["running"]
-        if status["packageInstalled"] or stop_running:
-            if not self.confirm_cockpit_operation(operation, status):
+        if status["packageInstalled"] or status["running"]:
+            if not self.confirm_cockpit_operation("install", status):
                 self.log("Cockpit fork installation cancelled.")
                 return
-        self.start_cockpit_action(operation, stop_running=stop_running)
+        self.start_cockpit_action("install", stop_running=True)
 
     def on_cockpit_uninstall(self, _button):
         if self.cockpit_install_process is not None and self.cockpit_install_process.poll() is None:
@@ -2969,7 +2968,7 @@ class App(Gtk.ApplicationWindow):
         self.start_cockpit_action("uninstall", stop_running=status["running"])
 
     def confirm_cockpit_operation(self, action, status):
-        if action in ("install", "repair"):
+        if action == "install":
             if status["managedFork"]:
                 title = "Update Cockpit Tools fork?"
                 detail = (
@@ -2977,7 +2976,7 @@ class App(Gtk.ApplicationWindow):
                     "remove the managed package, and install the new .deb. "
                     "Account/config data will be kept."
                 )
-            elif action == "repair":
+            elif status["packageInstalled"]:
                 title = "Replace Cockpit Tools with the fork?"
                 detail = (
                     "An official or changed cockpit-tools package is installed. Linux Toolbox will "
@@ -2996,12 +2995,12 @@ class App(Gtk.ApplicationWindow):
                 "It will not purge account, session, or configuration data."
             )
         if status["running"]:
-            detail += "\n\nCockpit Tools is currently open; Continue will request a clean shutdown before the package operation."
+            detail += "\n\nCockpit Tools is currently open; Continue will close it before the package operation."
 
         dialog = Gtk.MessageDialog(
             transient_for=self,
             modal=True,
-            message_type=Gtk.MessageType.WARNING if action in ("install", "repair") else Gtk.MessageType.QUESTION,
+            message_type=Gtk.MessageType.WARNING if action == "install" else Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.NONE,
             text=title,
         )
@@ -3020,17 +3019,10 @@ class App(Gtk.ApplicationWindow):
                     "Downloading and verifying the Cockpit Tools Codex fork package. "
                     "The current package will not be changed until verification succeeds."
                 )
-            elif action == "repair":
-                self.log(
-                    "Replacing the current Cockpit Tools package with the verified Codex fork. "
-                    "The current package will not be changed until verification succeeds."
-                )
             else:
                 self.log("Removing the Linux Toolbox-managed Cockpit Tools fork.")
             if action == "install":
                 self.cockpit_install_process = self.cockpit_service.start_install(stop_running=stop_running)
-            elif action == "repair":
-                self.cockpit_install_process = self.cockpit_service.start_repair(stop_running=stop_running)
             else:
                 self.cockpit_install_process = self.cockpit_service.start_uninstall(stop_running=stop_running)
             GLib.child_watch_add(
@@ -3055,7 +3047,7 @@ class App(Gtk.ApplicationWindow):
         if exit_code == 0:
             try:
                 current = self.cockpit_service.get_status()
-                if action in ("install", "repair") and current["managedFork"]:
+                if action == "install" and current["managedFork"]:
                     self.log("Cockpit Tools Codex fork installed. Account/config data was preserved.")
                 elif action == "uninstall" and not current["packageInstalled"]:
                     self.log("Cockpit Tools Codex fork removed. Account/config data was preserved.")
