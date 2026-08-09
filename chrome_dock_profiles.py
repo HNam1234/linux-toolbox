@@ -2945,10 +2945,11 @@ class App(Gtk.ApplicationWindow):
             self.log("Cockpit fork installation requires a Debian/Ubuntu-style Linux system with dpkg.")
             return
 
-        if status["packageInstalled"] or status["running"]:
-            if not self.confirm_cockpit_operation("install", status):
-                self.log("Cockpit fork installation cancelled.")
-                return
+        # This is the primary one-click action: a visible confirmation dialog
+        # can be obscured behind the main window and makes the button look
+        # unresponsive. The installer still verifies the download before it
+        # removes anything and uses graphical polkit authentication for the
+        # package operation.
         self.start_cockpit_action("install", stop_running=True)
 
     def on_cockpit_uninstall(self, _button):
