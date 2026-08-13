@@ -70,3 +70,7 @@ jobs:
         
         echo "Validating script syntax..."
         bash -n ~/.local/bin/chrome-profile-launch
+
+    - name: Run regression tests
+      run: |
+        PYTHONPATH=src python3 -m unittest discover -s tests -v
